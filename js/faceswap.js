@@ -1,8 +1,9 @@
 // Face swap: MediaPipe Face Landmarker + piecewise-affine triangle warp,
-// colour matching and a feathered blend. Everything runs on-device.
+// Lab colour matching and multi-band blending. Everything runs on-device.
 
 import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 import { triangulate } from './delaunay.js';
+import { colorMatchLab, multiBandBlend, rgbaToRgb } from './blend.js';
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -23,13 +24,26 @@ const SHAPE_BLEND = 0.15;
  * How far the source skin is pulled toward the selfie's colour statistics.
  * 0 = source keeps its own skin tone; 1 = full mean/std match.
  */
-const COLOR_MATCH_STRENGTH = 0.4;
+const COLOR_MATCH_STRENGTH = 0.65;
 
 /** How far the pasted region extends above the top of the face oval, as a fraction of face height. */
-const FOREHEAD_EXTENSION = 0.25;
+const FOREHEAD_EXTENSION = 0.1;
 
-/** Width of the soft edge around the swapped face, as a fraction of face width. */
-const FEATHER = 0.05;
+/**
+ * Distance over which the top of the mask fades out, as a fraction of face height.
+ * The fade reaches zero at the top-of-forehead landmark (whichever of the source's or
+ * the selfie's sits lower), so the edge dissolves on forehead skin, below either hairline.
+ */
+const TOP_FADE = 0.2;
+
+/**
+ * Width of the soft edge along the cheeks and jaw, as a fraction of face width.
+ * The mask is eroded by this much and then blurred, so it reaches zero at the outline.
+ */
+const FEATHER = 0.08;
+
+/** Maximum number of pyramid levels for multi-band blending. */
+const PYRAMID_LEVELS = 6;
 
 /** Limits on how far colour matching may stretch contrast per channel. */
 const MIN_CONTRAST_GAIN = 0.6;
@@ -232,7 +246,8 @@ export async function swapFace(selfie) {
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   }
   const faceW = maxX - minX;
-  const pad = faceW * 0.05;
+  // Coarse pyramid levels spread colour well beyond the mask, so leave room for them.
+  const pad = faceW * 0.3;
   const bx = Math.max(0, Math.floor(minX - pad));
   const by = Math.max(0, Math.floor(minY - pad));
   const bw = Math.min(W, Math.ceil(maxX + pad)) - bx;
@@ -255,11 +270,85 @@ export async function swapFace(selfie) {
   cctx.drawImage(warped, bx, by, bw, bh, 0, 0, bw, bh);
   const warpedData = cctx.getImageData(0, 0, bw, bh);
 
+  const n = bw * bh;
+  const coverage = new Float32Array(n);
+  for (let p = 0; p < n; p++) coverage[p] = warpedData.data[p * 4 + 3] / 255;
+
+  // Fade along the face's own vertical axis, reaching 0 at the lower of the two
+  // top-of-forehead landmarks so neither the source's hair nor the selfie's hairline is covered.
+  const fade = topFade(targets[FOREHEAD], dst[FOREHEAD], targets[CHIN], bx, by, bw, bh);
+
+  // Colour statistics come from the inner face only, away from hair and background.
+  const skin = fillPolygon(shrink(oval, 0.8), bx, by, bw, bh);
+  const matched = colorMatchLab(
+    selfieData.data, warpedData.data, skin, COLOR_MATCH_STRENGTH, MIN_CONTRAST_GAIN, MAX_CONTRAST_GAIN,
+  );
+
+  // The foreground image is the source only inside its outline and the selfie elsewhere,
+  // so the wide, coarse pyramid levels can't drag the source's hair or background in.
+  const selfieRgb = rgbaToRgb(selfieData.data);
+  const content = fillPolygon(outline, bx, by, bw, bh);
+  for (let p = 0; p < n; p++) {
+    const a = content[p] * fade[p] * coverage[p];
+    for (let c = 0; c < 3; c++) {
+      const i = p * 3 + c;
+      matched[i] = selfieRgb[i] + (matched[i] - selfieRgb[i]) * a;
+    }
+  }
+
   const mask = buildMask(outline, bx, by, bw, bh, faceW);
-  const skin = fillPolygon(oval, bx, by, bw, bh); // colour stats from the face only, not the hair
-  colorMatchAndBlend(selfieData.data, warpedData.data, mask, skin);
+  for (let p = 0; p < n; p++) mask[p] *= fade[p] * coverage[p] * BLEND_STRENGTH;
+
+  const levels = Math.max(1, Math.min(PYRAMID_LEVELS, Math.floor(Math.log2(Math.min(bw, bh) / 8))));
+  const blended = multiBandBlend(matched, selfieRgb, mask, bw, bh, levels);
+
+  // Ease any low-frequency spill back to the untouched selfie at crop edges inside the image.
+  const ramp = Math.max(1, pad * 0.5);
+  const rampL = bx > 0 ? ramp : 0, rampT = by > 0 ? ramp : 0;
+  const rampR = bx + bw < W ? ramp : 0, rampB = by + bh < H ? ramp : 0;
+  const edge = (d, r) => (r ? Math.min(1, d / r) : 1);
+  const px = selfieData.data;
+  for (let y = 0; y < bh; y++) {
+    const ey = Math.min(edge(y, rampT), edge(bh - 1 - y, rampB));
+    for (let x = 0; x < bw; x++) {
+      const e = Math.min(ey, edge(x, rampL), edge(bw - 1 - x, rampR));
+      const p = y * bw + x;
+      for (let c = 0; c < 3; c++) {
+        const i = p * 3 + c;
+        px[p * 4 + c] = selfieRgb[i] + (blended[i] - selfieRgb[i]) * e; // Uint8Clamped clamps
+      }
+    }
+  }
 
   octx.putImageData(selfieData, bx, by);
+  return out;
+}
+
+/** Scale a polygon about its centroid. */
+function shrink(poly, k) {
+  const [cx, cy] = centroid(poly);
+  return poly.map(([x, y]) => [cx + (x - cx) * k, cy + (y - cy) * k]);
+}
+
+/**
+ * Per-pixel weight that is 1 well inside the face and eases to 0 at the lower of the
+ * two forehead points, measured along the chin-to-forehead axis, over TOP_FADE of the
+ * face height.
+ */
+function topFade(forehead, selfieForehead, chin, bx, by, bw, bh) {
+  const h = Math.hypot(forehead[0] - chin[0], forehead[1] - chin[1]) || 1;
+  const ux = (forehead[0] - chin[0]) / h, uy = (forehead[1] - chin[1]) / h;
+  const height = (p) => (p[0] - chin[0]) * ux + (p[1] - chin[1]) * uy;
+  const top = height(selfieForehead) < height(forehead) ? selfieForehead : forehead;
+  const span = TOP_FADE * h;
+  const out = new Float32Array(bw * bh);
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      const below = -((x + bx - top[0]) * ux + (y + by - top[1]) * uy); // distance below the top
+      const t = Math.min(1, Math.max(0, below / span));
+      out[y * bw + x] = t * t * (3 - 2 * t);
+    }
+  }
   return out;
 }
 
@@ -284,25 +373,29 @@ function fillPolygon(poly, bx, by, bw, bh) {
   return a;
 }
 
-/** Feathered mask (0..1 per pixel) over the crop box from the extended face outline. */
+/**
+ * Soft mask (0..1 per pixel) over the crop box: the outline is eroded by half the
+ * feather width and then blurred, so the edge ramps from 1 inside the face to 0
+ * exactly at the outline, with no hard line along the cheeks or jaw.
+ */
 function buildMask(outline, bx, by, bw, bh, faceW) {
-  const r = Math.max(1, Math.round((faceW * FEATHER) / 2));
+  // Three box-blur passes of radius q spread an edge over +-3q (close to a Gaussian;
+  // ctx.filter is unreliable on iOS), so erode by 3q.
+  const q = Math.max(1, Math.round((faceW * FEATHER) / 6));
+  const erode = 3 * q;
 
-  // Inset the outline by the blur radius so the soft edge fades out at the boundary.
   const [cx, cy] = centroid(outline);
   const inset = outline.map(([x, y]) => {
     const dx = x - cx, dy = y - cy;
-    const k = Math.max(0, 1 - r / (Math.hypot(dx, dy) || 1));
+    const k = Math.max(0, 1 - erode / (Math.hypot(dx, dy) || 1));
     return [cx + dx * k, cy + dy * k];
   });
   const a = fillPolygon(inset, bx, by, bw, bh);
 
-  // Two separable box-blur passes approximate a Gaussian (ctx.filter is unreliable on iOS).
   const b = new Float32Array(a.length);
-  const half = Math.max(1, Math.round(r / 2));
-  for (let pass = 0; pass < 2; pass++) {
-    blurLine(a, b, bw, bh, half, true);
-    blurLine(b, a, bw, bh, half, false);
+  for (let pass = 0; pass < 3; pass++) {
+    blurLine(a, b, bw, bh, q, true);
+    blurLine(b, a, bw, bh, q, false);
   }
   return a;
 }
@@ -323,45 +416,6 @@ function blurLine(src, dst, w, h, r, horizontal) {
       const sub = k - r;
       if (add < len) acc += src[base + add * step];
       if (sub >= 0) acc -= src[base + sub * step];
-    }
-  }
-}
-
-/**
- * Nudge the warped face's per-channel mean/std toward the selfie's (measured over the
- * `skin` region) by COLOR_MATCH_STRENGTH, then alpha-blend it into `selfie` in place.
- */
-function colorMatchAndBlend(selfie, warped, mask, skin) {
-  const sumS = [0, 0, 0], sqS = [0, 0, 0];
-  const sumW = [0, 0, 0], sqW = [0, 0, 0];
-  let n = 0;
-  for (let p = 0, i = 0; p < mask.length; p++, i += 4) {
-    if (skin[p] < 0.5 || warped[i + 3] < 250) continue;
-    for (let c = 0; c < 3; c++) {
-      const s = selfie[i + c], w = warped[i + c];
-      sumS[c] += s; sqS[c] += s * s;
-      sumW[c] += w; sqW[c] += w * w;
-    }
-    n++;
-  }
-  if (n === 0) return;
-
-  const meanS = [], meanW = [], gain = [];
-  for (let c = 0; c < 3; c++) {
-    meanS[c] = sumS[c] / n;
-    meanW[c] = sumW[c] / n;
-    const sdS = Math.sqrt(Math.max(0, sqS[c] / n - meanS[c] ** 2));
-    const sdW = Math.sqrt(Math.max(0, sqW[c] / n - meanW[c] ** 2));
-    gain[c] = Math.min(MAX_CONTRAST_GAIN, Math.max(MIN_CONTRAST_GAIN, sdS / (sdW || 1)));
-  }
-
-  for (let p = 0, i = 0; p < mask.length; p++, i += 4) {
-    const a = mask[p] * (warped[i + 3] / 255) * BLEND_STRENGTH;
-    if (a <= 0.002) continue;
-    for (let c = 0; c < 3; c++) {
-      const full = (warped[i + c] - meanW[c]) * gain[c] + meanS[c];
-      const matched = warped[i + c] + (full - warped[i + c]) * COLOR_MATCH_STRENGTH;
-      selfie[i + c] = selfie[i + c] + (matched - selfie[i + c]) * a; // Uint8Clamped clamps
     }
   }
 }
