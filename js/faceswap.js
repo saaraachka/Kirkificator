@@ -9,10 +9,27 @@ import { triangulate } from './delaunay.js';
 // ---------------------------------------------------------------------------
 
 /** How strongly the source face replaces the selfie: 0 = untouched selfie, 1 = full swap. */
-export const BLEND_STRENGTH = 0.85;
+export const BLEND_STRENGTH = 1.0;
+
+/**
+ * How much the source face bends to fit the selfie's features.
+ * 0 = the source is only rotated, scaled and moved onto the head, keeping its own
+ * proportions (the "kirkified" look); 1 = every landmark is pulled onto the selfie's
+ * landmarks (a faithful warp that ends up looking like the selfie person).
+ */
+const SHAPE_BLEND = 0.15;
+
+/**
+ * How far the source skin is pulled toward the selfie's colour statistics.
+ * 0 = source keeps its own skin tone; 1 = full mean/std match.
+ */
+const COLOR_MATCH_STRENGTH = 0.4;
+
+/** How far the pasted region extends above the top of the face oval, as a fraction of face height. */
+const FOREHEAD_EXTENSION = 0.25;
 
 /** Width of the soft edge around the swapped face, as a fraction of face width. */
-const FEATHER = 0.08;
+const FEATHER = 0.05;
 
 /** Limits on how far colour matching may stretch contrast per channel. */
 const MIN_CONTRAST_GAIN = 0.6;
@@ -31,6 +48,10 @@ const FACE_OVAL = [
   10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
   152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
 ];
+const FOREHEAD = 10;
+const CHIN = 152;
+const LEFT_EYE = [33, 133, 159, 145];
+const RIGHT_EYE = [362, 263, 386, 374];
 
 export class FaceSwapError extends Error {
   constructor(kind, cause) {
@@ -67,14 +88,77 @@ async function doInit() {
   const landmarks = detect(canvas);
   if (!landmarks) throw new FaceSwapError('source-no-face');
 
-  const points = landmarks.map((p) => [p.x * canvas.width, p.y * canvas.height]);
+  const mesh = landmarks.map((p) => [p.x * canvas.width, p.y * canvas.height]);
+  const { ring, maskOutline } = buildSourceExtras(mesh);
+  const points = mesh.concat(ring);
   source = {
     canvas,
     points,
-    uvs: landmarks.map((p) => [p.x, p.y]),
+    uvs: points.map(([x, y]) => [x / canvas.width, y / canvas.height]),
     triangles: triangulate(points),
+    maskOutline,
   };
   warper = createGLWarper(canvas) || create2DWarper(canvas);
+}
+
+/**
+ * The face mesh stops at the top of the forehead, but the hairline is a big part of
+ * what makes a face recognisable. Add an outer ring of points around the face oval,
+ * pushed further out at the top, so the warp also carries the source's forehead and
+ * hair; plus the matching extended outline used for the blend mask.
+ */
+function buildSourceExtras(mesh) {
+  const top = mesh[FOREHEAD];
+  const chin = mesh[CHIN];
+  const h = Math.hypot(top[0] - chin[0], top[1] - chin[1]);
+  const up = [(top[0] - chin[0]) / h, (top[1] - chin[1]) / h];
+  const [cx, cy] = centroid(FACE_OVAL.map((i) => mesh[i]));
+
+  const ring = [];
+  const maskOutline = [];
+  for (const i of FACE_OVAL) {
+    const [x, y] = mesh[i];
+    const len = Math.hypot(x - cx, y - cy) || 1;
+    const out = [(x - cx) / len, (y - cy) / len];
+    const upness = Math.max(0, out[0] * up[0] + out[1] * up[1]); // 1 at the top, 0 at the sides and below
+    const lift = FOREHEAD_EXTENSION * h * upness;
+    maskOutline.push([x + up[0] * lift, y + up[1] * lift]);
+    // The ring sits a little beyond the mask outline so the warp covers the feathered edge.
+    const pad = 0.12 * h;
+    ring.push([x + up[0] * lift * 1.3 + out[0] * pad, y + up[1] * lift * 1.3 + out[1] * pad]);
+  }
+  return { ring, maskOutline };
+}
+
+function centroid(pts) {
+  let x = 0, y = 0;
+  for (const p of pts) { x += p[0]; y += p[1]; }
+  return [x / pts.length, y / pts.length];
+}
+
+/** Eye centres plus forehead and chin: the anchors for the similarity transform. */
+function anchors(pts) {
+  return [centroid(LEFT_EYE.map((i) => pts[i])), centroid(RIGHT_EYE.map((i) => pts[i])), pts[FOREHEAD], pts[CHIN]];
+}
+
+/**
+ * Least-squares similarity transform (rotation, uniform scale, translation) mapping
+ * `from` onto `to`. Returns a function that applies it to a point.
+ */
+function fitSimilarity(from, to) {
+  const [fx, fy] = centroid(from);
+  const [tx, ty] = centroid(to);
+  let num = 0, cross = 0, den = 0;
+  for (let i = 0; i < from.length; i++) {
+    const ax = from[i][0] - fx, ay = from[i][1] - fy;
+    const bx = to[i][0] - tx, by = to[i][1] - ty;
+    num += ax * bx + ay * by;
+    cross += ax * by - ay * bx;
+    den += ax * ax + ay * ay;
+  }
+  const a = num / den; // scale * cos(angle)
+  const b = cross / den; // scale * sin(angle)
+  return ([x, y]) => [a * (x - fx) - b * (y - fy) + tx, b * (x - fx) + a * (y - fy) + ty];
 }
 
 async function createLandmarker() {
@@ -120,23 +204,42 @@ export async function swapFace(selfie) {
   const landmarks = detect(selfie);
   if (!landmarks) return null;
   const dst = landmarks.map((p) => [p.x * W, p.y * H]);
+  const src = source.points;
 
-  // Work only inside a padded box around the face to keep per-pixel work small.
-  const oval = FACE_OVAL.map((i) => dst[i]);
+  // Place the source face on the head with one rotation + uniform scale + translation,
+  // then let each landmark drift SHAPE_BLEND of the way toward the selfie's landmark.
+  const sim = fitSimilarity(anchors(src), anchors(dst));
+  const targets = new Array(src.length);
+  for (let i = 0; i < MESH_POINTS; i++) {
+    const [sx, sy] = sim(src[i]);
+    targets[i] = [sx + (dst[i][0] - sx) * SHAPE_BLEND, sy + (dst[i][1] - sy) * SHAPE_BLEND];
+  }
+  // Ring and mask points have no selfie counterpart: they follow their oval landmark.
+  const follow = (p, k) => {
+    const i = FACE_OVAL[k];
+    const [px, py] = sim(p);
+    const [ox, oy] = sim(src[i]);
+    return [px + targets[i][0] - ox, py + targets[i][1] - oy];
+  };
+  FACE_OVAL.forEach((_, k) => { targets[MESH_POINTS + k] = follow(src[MESH_POINTS + k], k); });
+  const outline = source.maskOutline.map(follow);
+  const oval = FACE_OVAL.map((i) => targets[i]);
+
+  // Work only inside a box around the pasted region to keep per-pixel work small.
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [x, y] of oval) {
+  for (const [x, y] of outline) {
     minX = Math.min(minX, x); maxX = Math.max(maxX, x);
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   }
   const faceW = maxX - minX;
-  const pad = faceW * 0.1;
+  const pad = faceW * 0.05;
   const bx = Math.max(0, Math.floor(minX - pad));
   const by = Math.max(0, Math.floor(minY - pad));
   const bw = Math.min(W, Math.ceil(maxX + pad)) - bx;
   const bh = Math.min(H, Math.ceil(maxY + pad)) - by;
   if (bw < 8 || bh < 8) return null;
 
-  const warped = warper.render(dst, W, H);
+  const warped = warper.render(targets, W, H);
 
   const out = document.createElement('canvas');
   out.width = W;
@@ -152,8 +255,9 @@ export async function swapFace(selfie) {
   cctx.drawImage(warped, bx, by, bw, bh, 0, 0, bw, bh);
   const warpedData = cctx.getImageData(0, 0, bw, bh);
 
-  const mask = buildMask(oval, bx, by, bw, bh, faceW);
-  colorMatchAndBlend(selfieData.data, warpedData.data, mask);
+  const mask = buildMask(outline, bx, by, bw, bh, faceW);
+  const skin = fillPolygon(oval, bx, by, bw, bh); // colour stats from the face only, not the hair
+  colorMatchAndBlend(selfieData.data, warpedData.data, mask, skin);
 
   octx.putImageData(selfieData, bx, by);
   return out;
@@ -163,38 +267,38 @@ export async function swapFace(selfie) {
 // Mask, colour matching and blending
 // ---------------------------------------------------------------------------
 
-/** Feathered face-oval mask (0..1 per pixel) over the crop box. */
-function buildMask(oval, bx, by, bw, bh, faceW) {
-  const r = Math.max(1, Math.round((faceW * FEATHER) / 2));
-
-  // Inset the outline by the blur radius so the soft edge fades out at the face boundary.
-  let cx = 0, cy = 0;
-  for (const [x, y] of oval) { cx += x; cy += y; }
-  cx /= oval.length;
-  cy /= oval.length;
-
+/** Rasterise a polygon (image coordinates) into a 0..1 coverage map over the crop box. */
+function fillPolygon(poly, bx, by, bw, bh) {
   const c = document.createElement('canvas');
   c.width = bw;
   c.height = bh;
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = '#fff';
   ctx.beginPath();
-  oval.forEach(([x, y], i) => {
-    const dx = x - cx, dy = y - cy;
-    const k = Math.max(0, 1 - r / (Math.hypot(dx, dy) || 1));
-    const px = cx + dx * k - bx;
-    const py = cy + dy * k - by;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  });
+  poly.forEach(([x, y], i) => (i ? ctx.lineTo(x - bx, y - by) : ctx.moveTo(x - bx, y - by)));
   ctx.closePath();
   ctx.fill();
-
   const rgba = ctx.getImageData(0, 0, bw, bh).data;
-  let a = new Float32Array(bw * bh);
+  const a = new Float32Array(bw * bh);
   for (let i = 0; i < a.length; i++) a[i] = rgba[i * 4 + 3] / 255;
+  return a;
+}
+
+/** Feathered mask (0..1 per pixel) over the crop box from the extended face outline. */
+function buildMask(outline, bx, by, bw, bh, faceW) {
+  const r = Math.max(1, Math.round((faceW * FEATHER) / 2));
+
+  // Inset the outline by the blur radius so the soft edge fades out at the boundary.
+  const [cx, cy] = centroid(outline);
+  const inset = outline.map(([x, y]) => {
+    const dx = x - cx, dy = y - cy;
+    const k = Math.max(0, 1 - r / (Math.hypot(dx, dy) || 1));
+    return [cx + dx * k, cy + dy * k];
+  });
+  const a = fillPolygon(inset, bx, by, bw, bh);
 
   // Two separable box-blur passes approximate a Gaussian (ctx.filter is unreliable on iOS).
-  let b = new Float32Array(a.length);
+  const b = new Float32Array(a.length);
   const half = Math.max(1, Math.round(r / 2));
   for (let pass = 0; pass < 2; pass++) {
     blurLine(a, b, bw, bh, half, true);
@@ -224,15 +328,15 @@ function blurLine(src, dst, w, h, r, horizontal) {
 }
 
 /**
- * Match the warped face's per-channel mean/std to the selfie's within the face
- * region, then alpha-blend it into `selfie` in place.
+ * Nudge the warped face's per-channel mean/std toward the selfie's (measured over the
+ * `skin` region) by COLOR_MATCH_STRENGTH, then alpha-blend it into `selfie` in place.
  */
-function colorMatchAndBlend(selfie, warped, mask) {
+function colorMatchAndBlend(selfie, warped, mask, skin) {
   const sumS = [0, 0, 0], sqS = [0, 0, 0];
   const sumW = [0, 0, 0], sqW = [0, 0, 0];
   let n = 0;
   for (let p = 0, i = 0; p < mask.length; p++, i += 4) {
-    if (mask[p] < 0.5 || warped[i + 3] < 250) continue;
+    if (skin[p] < 0.5 || warped[i + 3] < 250) continue;
     for (let c = 0; c < 3; c++) {
       const s = selfie[i + c], w = warped[i + c];
       sumS[c] += s; sqS[c] += s * s;
@@ -255,7 +359,8 @@ function colorMatchAndBlend(selfie, warped, mask) {
     const a = mask[p] * (warped[i + 3] / 255) * BLEND_STRENGTH;
     if (a <= 0.002) continue;
     for (let c = 0; c < 3; c++) {
-      const matched = (warped[i + c] - meanW[c]) * gain[c] + meanS[c];
+      const full = (warped[i + c] - meanW[c]) * gain[c] + meanS[c];
+      const matched = warped[i + c] + (full - warped[i + c]) * COLOR_MATCH_STRENGTH;
       selfie[i + c] = selfie[i + c] + (matched - selfie[i + c]) * a; // Uint8Clamped clamps
     }
   }

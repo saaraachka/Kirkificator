@@ -16,7 +16,10 @@ The landmarks for the source face are computed once when the page loads, so swap
 
 At the top of `js/faceswap.js`:
 
-- `BLEND_STRENGTH` (0 to 1) controls how strongly the source face replaces the selfie. 1 is a full swap, around 0.6 to 0.7 gives a subtler "something's off" look.
+- `BLEND_STRENGTH` (0 to 1, default 1) controls how strongly the source face replaces the selfie. 1 is a full paste, around 0.6 to 0.7 gives a subtler "something's off" look.
+- `SHAPE_BLEND` (0 to 1, default 0.15) controls how much the source face bends to fit the selfie. At 0 it is only rotated, scaled and moved onto the head, so it keeps its own proportions (the "kirkified" look). At 1 every landmark is pulled onto the selfie's, which ends up looking like the selfie person.
+- `COLOR_MATCH_STRENGTH` (0 to 1, default 0.4) controls how far the source skin tone is pulled toward the selfie's lighting. Lower keeps more of the source's own colouring.
+- `FOREHEAD_EXTENSION` is how far the pasted region reaches above the face oval to bring the source's forehead and hairline along, as a fraction of face height.
 - `FEATHER` is the width of the soft edge around the face, as a fraction of face width.
 - `MIN_CONTRAST_GAIN` / `MAX_CONTRAST_GAIN` limit how far colour matching can stretch contrast.
 
@@ -45,6 +48,6 @@ The site is plain files in the repo root (`index.html`, `css/`, `js/`, `assets/`
 
 - `js/app.js` drives the screens: intro → camera with a 3-2-1 countdown → processing lines → result (or a themed error). It also bakes the "YOUR DESTINY" stamp into the image and handles Save/Share via the Web Share API, falling back to a download.
 - `js/camera.js` opens the front camera (`facingMode: 'user'`) and captures exactly the mirrored, cropped frame shown in the preview, capped at 960 px.
-- `js/faceswap.js` detects 468 face landmarks on both images, Delaunay-triangulates the source landmarks once (`js/delaunay.js`), and draws each source triangle onto the matching selfie triangle with WebGL (falling back to Canvas 2D affine transforms without WebGL). It then matches the warped face's per-channel mean and standard deviation to the selfie's skin inside the face oval and blends it in through a feathered face-oval mask.
+- `js/faceswap.js` detects 468 face landmarks on both images, fits a single similarity transform (rotation, uniform scale, translation) from the source's eye centres, forehead and chin to the selfie's, and moves each source landmark there, nudged `SHAPE_BLEND` of the way toward the selfie landmark. An extra ring of points above and around the face oval carries the source's forehead and hairline along. The source points are Delaunay-triangulated once (`js/delaunay.js`) and each triangle is drawn onto its target with WebGL (falling back to Canvas 2D affine transforms without WebGL). The result is partly colour-matched to the selfie's skin (per-channel mean and standard deviation) and blended in through a feathered mask that follows the face oval and extends up over the forehead.
 
 Tested in Chromium; it targets iOS Safari 15+ and current Android Chrome. On iOS the Web Share sheet offers "Save Image"; on browsers without file sharing the image downloads instead, and press-and-hold on the result image also works.
