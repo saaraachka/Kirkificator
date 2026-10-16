@@ -1,4 +1,4 @@
-// Colour matching in CIE Lab and multi-band (Laplacian pyramid) blending.
+// Frequency-separation face transfer (in CIE Lab) and multi-band (Laplacian pyramid) blending.
 // Images here are Float32Arrays of interleaved RGB (3 channels, 0..255) unless noted.
 
 // ---------------------------------------------------------------------------
@@ -42,49 +42,155 @@ function labToRgb(L, a, b, out, o) {
 }
 
 /**
- * Shift the warped face's Lab mean/std toward the selfie's, both measured over the
- * `skin` region, by `strength` (0..1). Returns the warped image as float RGB.
- * @param {Uint8ClampedArray} selfie RGBA
- * @param {Uint8ClampedArray} warped RGBA
- * @param {Float32Array} skin 0..1 per pixel
+ * Separable box blur (running sums) applied `passes` times in each direction, in place.
+ * Three passes of radius r approximate a Gaussian with sigma ~ r + 0.5. Pixels beyond
+ * the edge count as zero. `src` is single-channel, w x h.
  */
-export function colorMatchLab(selfie, warped, skin, strength, minGain, maxGain) {
-  const n = skin.length;
+export function boxBlur(src, w, h, r, passes = 3) {
+  const tmp = new Float32Array(src.length);
+  for (let pass = 0; pass < passes; pass++) {
+    blurLine(src, tmp, w, h, r, true);
+    blurLine(tmp, src, w, h, r, false);
+  }
+  return src;
+}
+
+function blurLine(src, dst, w, h, r, horizontal) {
+  const len = horizontal ? w : h;
+  const lines = horizontal ? h : w;
+  const step = horizontal ? 1 : w;
+  const lineStep = horizontal ? w : 1;
+  const norm = 1 / (2 * r + 1);
+  for (let l = 0; l < lines; l++) {
+    const base = l * lineStep;
+    let acc = 0;
+    for (let k = 0; k <= r && k < len; k++) acc += src[base + k * step];
+    for (let k = 0; k < len; k++) {
+      dst[base + k * step] = acc * norm;
+      const add = k + r + 1;
+      const sub = k - r;
+      if (add < len) acc += src[base + add * step];
+      if (sub >= 0) acc -= src[base + sub * step];
+    }
+  }
+}
+
+/**
+ * Low-frequency Lab image of skin only, as a normalised (weighted) blur: regions with
+ * zero weight (eyes, brows, lips, hair, background) are filled from the skin around
+ * them instead of leaking their own colour in. Computed on a grid `f` times coarser
+ * than the image (the blur is wide, so nothing is lost) and sampled back bilinearly.
+ * @returns {(x: number, y: number, out: Float32Array) => void} sampler
+ */
+function skinLowPass(rgba, weight, w, h, r) {
+  const f = Math.max(1, Math.floor(r / 4));
+  const lw = Math.ceil(w / f), lh = Math.ceil(h / f), ln = lw * lh;
+
+  // Weighted average colour of each f x f cell, then its Lab, weighted by the cell's skin.
+  const den = new Float32Array(ln);
+  const rgb = new Float32Array(ln * 3);
+  for (let y = 0; y < h; y++) {
+    const row = ((y / f) | 0) * lw;
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x, wt = weight[p];
+      if (wt === 0) continue;
+      const cell = row + ((x / f) | 0);
+      den[cell] += wt;
+      rgb[cell * 3] += rgba[p * 4] * wt;
+      rgb[cell * 3 + 1] += rgba[p * 4 + 1] * wt;
+      rgb[cell * 3 + 2] += rgba[p * 4 + 2] * wt;
+    }
+  }
+  const num = [new Float32Array(ln), new Float32Array(ln), new Float32Array(ln)];
   const lab = new Float32Array(3);
-  const sumS = [0, 0, 0], sqS = [0, 0, 0], sumW = [0, 0, 0], sqW = [0, 0, 0];
-  let count = 0;
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    if (skin[p] < 0.5 || warped[i + 3] < 250) continue;
-    rgbToLab(selfie[i], selfie[i + 1], selfie[i + 2], lab, 0);
-    for (let c = 0; c < 3; c++) { sumS[c] += lab[c]; sqS[c] += lab[c] * lab[c]; }
-    rgbToLab(warped[i], warped[i + 1], warped[i + 2], lab, 0);
-    for (let c = 0; c < 3; c++) { sumW[c] += lab[c]; sqW[c] += lab[c] * lab[c]; }
-    count++;
+  const mean = [0, 0, 0];
+  let total = 0;
+  for (let cell = 0; cell < ln; cell++) {
+    const d = den[cell];
+    if (d === 0) continue;
+    rgbToLab(Math.round(rgb[cell * 3] / d), Math.round(rgb[cell * 3 + 1] / d), Math.round(rgb[cell * 3 + 2] / d), lab, 0);
+    for (let c = 0; c < 3; c++) {
+      num[c][cell] = lab[c] * d;
+      mean[c] += num[c][cell];
+    }
+    total += d;
+  }
+  for (let c = 0; c < 3; c++) mean[c] = total > 0 ? mean[c] / total : c === 0 ? 50 : 0;
+
+  const lr = Math.max(1, Math.round(r / f));
+  boxBlur(den, lw, lh, lr);
+  num.forEach((ch) => boxBlur(ch, lw, lh, lr));
+
+  // Far from any skin the weights vanish; fall back smoothly to the mean skin colour.
+  const eps = 1e-3 * f * f;
+  const low = new Float32Array(ln * 3);
+  for (let cell = 0; cell < ln; cell++) {
+    const d = den[cell] + eps;
+    for (let c = 0; c < 3; c++) low[cell * 3 + c] = (num[c][cell] + eps * mean[c]) / d;
   }
 
-  const out = new Float32Array(n * 3);
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    out[p * 3] = warped[i];
-    out[p * 3 + 1] = warped[i + 1];
-    out[p * 3 + 2] = warped[i + 2];
-  }
-  if (count === 0 || strength <= 0) return out;
+  return (x, y, out) => {
+    const gx = Math.min(lw - 1, Math.max(0, (x + 0.5) / f - 0.5));
+    const gy = Math.min(lh - 1, Math.max(0, (y + 0.5) / f - 0.5));
+    const x0 = gx | 0, y0 = gy | 0;
+    const x1 = Math.min(lw - 1, x0 + 1), y1 = Math.min(lh - 1, y0 + 1);
+    const tx = gx - x0, ty = gy - y0;
+    const a = (y0 * lw + x0) * 3, b = (y0 * lw + x1) * 3, c = (y1 * lw + x0) * 3, d = (y1 * lw + x1) * 3;
+    for (let k = 0; k < 3; k++) {
+      const top = low[a + k] + (low[b + k] - low[a + k]) * tx;
+      const bottom = low[c + k] + (low[d + k] - low[c + k]) * tx;
+      out[k] = top + (bottom - top) * ty;
+    }
+  };
+}
 
-  // Per-channel affine map in Lab, already scaled by `strength`: v' = v * k + d.
-  const k = [], d = [];
-  for (let c = 0; c < 3; c++) {
-    const mS = sumS[c] / count, mW = sumW[c] / count;
-    const sdS = Math.sqrt(Math.max(0, sqS[c] / count - mS * mS));
-    const sdW = Math.sqrt(Math.max(0, sqW[c] / count - mW * mW));
-    const gain = Math.min(maxGain, Math.max(minGain, sdS / (sdW || 1)));
-    k[c] = 1 + (gain - 1) * strength;
-    d[c] = (mS - mW * gain) * strength;
-  }
+/** How far the kept eye and brow regions shift toward the selfie's skin tone and lighting. */
+const EYE_ADAPT = 0.35;
 
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    if (warped[i + 3] === 0) continue;
-    rgbToLab(warped[i], warped[i + 1], warped[i + 2], lab, 0);
-    labToRgb(lab[0] * k[0] + d[0], lab[1] * k[1] + d[1], lab[2] * k[2] + d[2], out, p * 3);
+/**
+ * Frequency-separation face transfer, computed in Lab:
+ *   face = selfie_lowfreq + (source - source_lowfreq) * detailStrength
+ * The low-frequency layers are skin-only blurs, so the result takes the selfie's skin
+ * tone, lighting and shading, and only the source contributes features and texture.
+ * Where `keep` is set (eyes and brows) the source's own colours are used instead,
+ * shifted only part way toward the selfie's lighting, so the whites of the eyes stay
+ * white and the brows keep their hair colour rather than taking the skin's tone.
+ * @param {Uint8ClampedArray} selfie RGBA
+ * @param {Uint8ClampedArray} warped RGBA, the source face warped into place
+ * @param {Float32Array} selfieSkin 0..1 weight: the selfie's skin, features cut out
+ * @param {Float32Array} sourceSkin 0..1 weight: the source's skin, features cut out
+ * @param {Float32Array} keep 0..1 weight where the source's own colours are kept
+ * @param {number} radius blur radius in px
+ * @returns {Float32Array} float RGB (0..255); selfie pixels where nothing was warped
+ */
+export function transferDetail(selfie, warped, selfieSkin, sourceSkin, keep, w, h, radius, detailStrength) {
+  const selfieLow = skinLowPass(selfie, selfieSkin, w, h, radius);
+  const sourceLow = skinLowPass(warped, sourceSkin, w, h, radius);
+
+  const out = new Float32Array(w * h * 3);
+  const src = new Float32Array(3), sLow = new Float32Array(3), wLow = new Float32Array(3), lab = new Float32Array(3);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x, i = p * 3;
+      if (warped[p * 4 + 3] === 0) {
+        out[i] = selfie[p * 4];
+        out[i + 1] = selfie[p * 4 + 1];
+        out[i + 2] = selfie[p * 4 + 2];
+        continue;
+      }
+      rgbToLab(warped[p * 4], warped[p * 4 + 1], warped[p * 4 + 2], src, 0);
+      selfieLow(x, y, sLow);
+      sourceLow(x, y, wLow);
+      const k = keep[p];
+      for (let c = 0; c < 3; c++) {
+        const separated = sLow[c] + (src[c] - wLow[c]) * detailStrength;
+        const own = src[c] + (sLow[c] - wLow[c]) * EYE_ADAPT;
+        lab[c] = separated + (own - separated) * k;
+      }
+      const L = Math.min(100, Math.max(0, lab[0]));
+      labToRgb(L, Math.min(127, Math.max(-128, lab[1])), Math.min(127, Math.max(-128, lab[2])), out, i);
+      for (let c = 0; c < 3; c++) out[i + c] = Math.min(255, Math.max(0, out[i + c]));
+    }
   }
   return out;
 }
@@ -177,48 +283,49 @@ function pyrUp(level, w, h, ch) {
  * Blend `fg` over `bg` (float RGB, w x h) through `mask` (0..1, w x h) band by band:
  * coarse levels (colour, lighting) mix across a wide area, fine levels (pores,
  * eyelashes) mix across a narrow one, so there is neither a seam nor a smeared face.
+ *
+ * Pyramids are linear, so blending the Laplacian pyramids of fg and bg is the same as
+ * adding the mask-weighted pyramid of their difference to bg. That needs one pyramid
+ * instead of two, and two expansions per level instead of three.
  * @returns {Float32Array} float RGB
  */
 export function multiBandBlend(fg, bg, mask, w, h, levels) {
-  const gf = [{ data: fg, w, h }];
-  const gb = [{ data: bg, w, h }];
+  const diff = new Float32Array(fg.length);
+  for (let i = 0; i < diff.length; i++) diff[i] = fg[i] - bg[i];
+
+  const gd = [{ data: diff, w, h }];
   const gm = [{ data: mask, w, h }];
   for (let i = 1; i < levels; i++) {
-    const f = gf[i - 1], b = gb[i - 1], m = gm[i - 1];
-    gf.push(pyrDown(f.data, f.w, f.h, 3));
-    gb.push(pyrDown(b.data, b.w, b.h, 3));
+    const d = gd[i - 1], m = gm[i - 1];
+    gd.push(pyrDown(d.data, d.w, d.h, 3));
     gm.push(pyrDown(m.data, m.w, m.h, 1));
   }
 
-  // Coarsest level: plain blend of the Gaussian images.
+  // Coarsest level: the Gaussian image itself, weighted by the mask.
   const top = levels - 1;
-  let out = new Float32Array(gf[top].data.length);
+  let out = new Float32Array(gd[top].data.length);
   {
-    const f = gf[top].data, b = gb[top].data, m = gm[top].data;
+    const d = gd[top].data, m = gm[top].data;
     for (let p = 0; p < m.length; p++) {
-      for (let c = 0; c < 3; c++) {
-        const i = p * 3 + c;
-        out[i] = b[i] + (f[i] - b[i]) * m[p];
-      }
+      for (let c = 0; c < 3; c++) out[p * 3 + c] = d[p * 3 + c] * m[p];
     }
   }
 
-  // Walk back down: out = expand(out) + blend of this level's Laplacians.
+  // Walk back down: out = expand(out) + mask * (this level's Laplacian of the difference).
   for (let l = top - 1; l >= 0; l--) {
-    const { w: lw, h: lh } = gf[l];
-    const upOut = pyrUp({ data: out, w: gf[l + 1].w, h: gf[l + 1].h }, lw, lh, 3);
-    const upF = pyrUp(gf[l + 1], lw, lh, 3);
-    const upB = pyrUp(gb[l + 1], lw, lh, 3);
-    const f = gf[l].data, b = gb[l].data, m = gm[l].data;
+    const { w: lw, h: lh } = gd[l];
+    const upOut = pyrUp({ data: out, w: gd[l + 1].w, h: gd[l + 1].h }, lw, lh, 3);
+    const upD = pyrUp(gd[l + 1], lw, lh, 3);
+    const d = gd[l].data, m = gm[l].data;
     for (let p = 0; p < m.length; p++) {
       for (let c = 0; c < 3; c++) {
         const i = p * 3 + c;
-        const lf = f[i] - upF[i];
-        const lb = b[i] - upB[i];
-        upOut[i] += lb + (lf - lb) * m[p];
+        upOut[i] += (d[i] - upD[i]) * m[p];
       }
     }
     out = upOut;
   }
+
+  for (let i = 0; i < out.length; i++) out[i] += bg[i];
   return out;
 }

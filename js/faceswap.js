@@ -1,9 +1,10 @@
 // Face swap: MediaPipe Face Landmarker + piecewise-affine triangle warp,
-// Lab colour matching and multi-band blending. Everything runs on-device.
+// frequency separation (source detail on the selfie's skin and lighting) and
+// multi-band blending. Everything runs on-device.
 
 import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 import { triangulate } from './delaunay.js';
-import { colorMatchLab, multiBandBlend, rgbaToRgb } from './blend.js';
+import { boxBlur, multiBandBlend, rgbaToRgb, transferDetail } from './blend.js';
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -18,13 +19,17 @@ export const BLEND_STRENGTH = 1.0;
  * proportions (the "kirkified" look); 1 = every landmark is pulled onto the selfie's
  * landmarks (a faithful warp that ends up looking like the selfie person).
  */
-const SHAPE_BLEND = 0.15;
+const SHAPE_BLEND = 0.35;
 
 /**
- * How far the source skin is pulled toward the selfie's colour statistics.
- * 0 = source keeps its own skin tone; 1 = full mean/std match.
+ * Frequency separation: the swapped face is the selfie's skin blurred by this radius
+ * (fraction of face width) plus the source's detail above that scale. Larger keeps more
+ * of the source's broad shading; smaller takes more lighting from the selfie.
  */
-const COLOR_MATCH_STRENGTH = 0.65;
+const LOWFREQ_RADIUS = 0.06;
+
+/** Strength of the source's features and texture laid over the selfie's skin (1 = as-is). */
+const DETAIL_STRENGTH = 1.0;
 
 /** How far the pasted region extends above the top of the face oval, as a fraction of face height. */
 const FOREHEAD_EXTENSION = 0.1;
@@ -45,10 +50,6 @@ const FEATHER = 0.08;
 /** Maximum number of pyramid levels for multi-band blending. */
 const PYRAMID_LEVELS = 6;
 
-/** Limits on how far colour matching may stretch contrast per channel. */
-const MIN_CONTRAST_GAIN = 0.6;
-const MAX_CONTRAST_GAIN = 1.6;
-
 // ---------------------------------------------------------------------------
 
 const SOURCE_FACE_URL = 'assets/source-face.jpg';
@@ -66,6 +67,20 @@ const FOREHEAD = 10;
 const CHIN = 152;
 const LEFT_EYE = [33, 133, 159, 145];
 const RIGHT_EYE = [362, 263, 386, 374];
+
+const LEFT_EYE_CONTOUR = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7];
+const RIGHT_EYE_CONTOUR = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249];
+const LEFT_BROW = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46];
+const RIGHT_BROW = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
+const LIPS = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146];
+
+// Regions cut out of the skin when measuring skin tone and lighting, each grown about its
+// centre. Each eye is taken together with its brow so lids, sockets and makeup go too.
+const FEATURES = [
+  { scale: 1.25, idx: LEFT_EYE_CONTOUR.concat(LEFT_BROW), hull: true },
+  { scale: 1.25, idx: RIGHT_EYE_CONTOUR.concat(RIGHT_BROW), hull: true },
+  { scale: 1.3, idx: LIPS },
+];
 
 export class FaceSwapError extends Error {
   constructor(kind, cause) {
@@ -278,13 +293,28 @@ export async function swapFace(selfie) {
   // top-of-forehead landmarks so neither the source's hair nor the selfie's hairline is covered.
   const fade = topFade(targets[FOREHEAD], dst[FOREHEAD], targets[CHIN], bx, by, bw, bh);
 
-  // Colour statistics come from the inner face only, away from hair and background.
-  const skin = fillPolygon(shrink(oval, 0.8), bx, by, bw, bh);
-  const matched = colorMatchLab(
-    selfieData.data, warpedData.data, skin, COLOR_MATCH_STRENGTH, MIN_CONTRAST_GAIN, MAX_CONTRAST_GAIN,
+  // Frequency separation: the selfie's skin tone and lighting (low frequencies) plus the
+  // source's features and texture (high frequencies). Both low-pass layers are skin-only,
+  // with eyes, brows and lips cut out, so the selfie's own features can't ghost through
+  // and the source's features keep their full contrast against his skin.
+  const selfieSkin = skinWeight(dst, bx, by, bw, bh);
+  const sourceSkin = skinWeight(targets, bx, by, bw, bh);
+  for (let p = 0; p < n; p++) sourceSkin[p] *= coverage[p] === 1 ? 1 : 0;
+  const radius = Math.max(2, Math.round(faceW * LOWFREQ_RADIUS));
+  // Eyes and brows aren't skin: there the source's own colours are kept, so the whites stay
+  // white and the brows keep their hair colour on any skin tone.
+  const ownColour = fillPolygons([
+    LEFT_EYE_CONTOUR.map((i) => targets[i]),
+    RIGHT_EYE_CONTOUR.map((i) => targets[i]),
+    shrink(LEFT_BROW.map((i) => targets[i]), 1.15),
+    shrink(RIGHT_BROW.map((i) => targets[i]), 1.15),
+  ], bx, by, bw, bh);
+  boxBlur(ownColour, bw, bh, Math.max(1, Math.round(faceW * 0.006)));
+  const face = transferDetail(
+    selfieData.data, warpedData.data, selfieSkin, sourceSkin, ownColour, bw, bh, radius, DETAIL_STRENGTH,
   );
 
-  // The foreground image is the source only inside its outline and the selfie elsewhere,
+  // The foreground image is the new face only inside the outline and the selfie elsewhere,
   // so the wide, coarse pyramid levels can't drag the source's hair or background in.
   const selfieRgb = rgbaToRgb(selfieData.data);
   const content = fillPolygon(outline, bx, by, bw, bh);
@@ -292,7 +322,7 @@ export async function swapFace(selfie) {
     const a = content[p] * fade[p] * coverage[p];
     for (let c = 0; c < 3; c++) {
       const i = p * 3 + c;
-      matched[i] = selfieRgb[i] + (matched[i] - selfieRgb[i]) * a;
+      face[i] = selfieRgb[i] + (face[i] - selfieRgb[i]) * a;
     }
   }
 
@@ -300,7 +330,7 @@ export async function swapFace(selfie) {
   for (let p = 0; p < n; p++) mask[p] *= fade[p] * coverage[p] * BLEND_STRENGTH;
 
   const levels = Math.max(1, Math.min(PYRAMID_LEVELS, Math.floor(Math.log2(Math.min(bw, bh) / 8))));
-  const blended = multiBandBlend(matched, selfieRgb, mask, bw, bh, levels);
+  const blended = multiBandBlend(face, selfieRgb, mask, bw, bh, levels);
 
   // Ease any low-frequency spill back to the untouched selfie at crop edges inside the image.
   const ramp = Math.max(1, pad * 0.5);
@@ -328,6 +358,66 @@ export async function swapFace(selfie) {
 function shrink(poly, k) {
   const [cx, cy] = centroid(poly);
   return poly.map(([x, y]) => [cx + (x - cx) * k, cy + (y - cy) * k]);
+}
+
+/** Union of several polygons as a 0..1 coverage map over the crop box. */
+function fillPolygons(polys, bx, by, bw, bh) {
+  const c = document.createElement('canvas');
+  c.width = bw;
+  c.height = bh;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  for (const poly of polys) {
+    ctx.beginPath();
+    poly.forEach(([x, y], i) => (i ? ctx.lineTo(x - bx, y - by) : ctx.moveTo(x - bx, y - by)));
+    ctx.closePath();
+    ctx.fill();
+  }
+  const rgba = ctx.getImageData(0, 0, bw, bh).data;
+  const a = new Float32Array(bw * bh);
+  for (let i = 0; i < a.length; i++) a[i] = rgba[i * 4 + 3] / 255;
+  return a;
+}
+
+/** Convex hull (monotone chain) of a set of points, in order. */
+function convexHull(points) {
+  const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list) => {
+    const out = [];
+    for (const p of list) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
+      out.push(p);
+    }
+    out.pop();
+    return out;
+  };
+  return half(pts).concat(half(pts.reverse()));
+}
+
+/** 0..1 weight over the crop box: inside the face oval, with eyes, brows and lips cut out. */
+function skinWeight(pts, bx, by, bw, bh) {
+  const c = document.createElement('canvas');
+  c.width = bw;
+  c.height = bh;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  const trace = (poly) => {
+    ctx.beginPath();
+    poly.forEach(([x, y], i) => (i ? ctx.lineTo(x - bx, y - by) : ctx.moveTo(x - bx, y - by)));
+    ctx.closePath();
+    ctx.fill();
+  };
+  ctx.fillStyle = '#fff';
+  trace(shrink(FACE_OVAL.map((i) => pts[i]), 0.92));
+  ctx.globalCompositeOperation = 'destination-out';
+  for (const f of FEATURES) {
+    const poly = f.idx.map((i) => pts[i]);
+    trace(shrink(f.hull ? convexHull(poly) : poly, f.scale));
+  }
+  const rgba = ctx.getImageData(0, 0, bw, bh).data;
+  const a = new Float32Array(bw * bh);
+  for (let i = 0; i < a.length; i++) a[i] = rgba[i * 4 + 3] / 255;
+  return a;
 }
 
 /**
@@ -392,32 +482,7 @@ function buildMask(outline, bx, by, bw, bh, faceW) {
   });
   const a = fillPolygon(inset, bx, by, bw, bh);
 
-  const b = new Float32Array(a.length);
-  for (let pass = 0; pass < 3; pass++) {
-    blurLine(a, b, bw, bh, q, true);
-    blurLine(b, a, bw, bh, q, false);
-  }
-  return a;
-}
-
-function blurLine(src, dst, w, h, r, horizontal) {
-  const len = horizontal ? w : h;
-  const lines = horizontal ? h : w;
-  const step = horizontal ? 1 : w;
-  const lineStep = horizontal ? w : 1;
-  const norm = 1 / (2 * r + 1);
-  for (let l = 0; l < lines; l++) {
-    const base = l * lineStep;
-    let acc = 0;
-    for (let k = 0; k <= r && k < len; k++) acc += src[base + k * step];
-    for (let k = 0; k < len; k++) {
-      dst[base + k * step] = acc * norm;
-      const add = k + r + 1;
-      const sub = k - r;
-      if (add < len) acc += src[base + add * step];
-      if (sub >= 0) acc -= src[base + sub * step];
-    }
-  }
+  return boxBlur(a, bw, bh, q, 3);
 }
 
 // ---------------------------------------------------------------------------
