@@ -31,6 +31,12 @@ const LOWFREQ_RADIUS = 0.06;
 /** Strength of the source's features and texture laid over the selfie's skin (1 = as-is). */
 const DETAIL_STRENGTH = 1.0;
 
+/**
+ * Extra scale for the detail layer inside the eyebrows only: above 1 makes the brows
+ * darker and stronger, below 1 softens them.
+ */
+const BROW_DARKEN = 1.0;
+
 /** How far the pasted region extends above the top of the face oval, as a fraction of face height. */
 const FOREHEAD_EXTENSION = 0.1;
 
@@ -73,14 +79,12 @@ const RIGHT_EYE_CONTOUR = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381
 const LEFT_BROW = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46];
 const RIGHT_BROW = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
 const LIPS = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146];
+// Upper lids: from the top of each eye up to the lower edge of its brow (catches eyeshadow).
+const LEFT_LID = [33, 246, 161, 160, 159, 158, 157, 173, 133, 55, 65, 52, 53, 46];
+const RIGHT_LID = [263, 466, 388, 387, 386, 385, 384, 398, 362, 285, 295, 282, 283, 276];
 
-// Regions cut out of the skin when measuring skin tone and lighting, each grown about its
-// centre. Each eye is taken together with its brow so lids, sockets and makeup go too.
-const FEATURES = [
-  { scale: 1.25, idx: LEFT_EYE_CONTOUR.concat(LEFT_BROW), hull: true },
-  { scale: 1.25, idx: RIGHT_EYE_CONTOUR.concat(RIGHT_BROW), hull: true },
-  { scale: 1.3, idx: LIPS },
-];
+/** How far the feature mask is grown beyond the landmark contours, as a fraction of face width. */
+const FEATURE_DILATE = 0.015;
 
 export class FaceSwapError extends Error {
   constructor(kind, cause) {
@@ -294,25 +298,29 @@ export async function swapFace(selfie) {
   const fade = topFade(targets[FOREHEAD], dst[FOREHEAD], targets[CHIN], bx, by, bw, bh);
 
   // Frequency separation: the selfie's skin tone and lighting (low frequencies) plus the
-  // source's features and texture (high frequencies). Both low-pass layers are skin-only,
-  // with eyes, brows and lips cut out, so the selfie's own features can't ghost through
-  // and the source's features keep their full contrast against his skin.
-  const selfieSkin = skinWeight(dst, bx, by, bw, bh);
-  const sourceSkin = skinWeight(targets, bx, by, bw, bh);
-  for (let p = 0; p < n; p++) sourceSkin[p] *= coverage[p] === 1 ? 1 : 0;
+  // source's features and texture (high frequencies). Both low-pass layers are masked,
+  // normalised blurs, blur(image * (1 - features)) / blur(1 - features), restricted to the
+  // face, so neither person's brows, eyes, lids or lips feed into them: skin colour is filled in
+  // underneath, the source's features keep their full darkness in the detail layer, and the
+  // selfie's own features can't ghost through.
+  const dilate = Math.max(2, faceW * FEATURE_DILATE);
+  const selfieFeatures = featureMask(dst, bx, by, bw, bh, dilate);
+  const sourceFeatures = featureMask(targets, bx, by, bw, bh, dilate);
+  const selfieSkin = fillPolygon(shrink(FACE_OVAL.map((i) => dst[i]), 0.92), bx, by, bw, bh);
+  const sourceSkin = fillPolygon(shrink(oval, 0.92), bx, by, bw, bh);
+  for (let p = 0; p < n; p++) {
+    selfieSkin[p] *= 1 - selfieFeatures.all[p];
+    sourceSkin[p] *= (1 - sourceFeatures.all[p]) * (coverage[p] === 1 ? 1 : 0);
+  }
   const radius = Math.max(2, Math.round(faceW * LOWFREQ_RADIUS));
-  // Eyes and brows aren't skin: there the source's own colours are kept, so the whites stay
-  // white and the brows keep their hair colour on any skin tone.
-  const ownColour = fillPolygons([
-    LEFT_EYE_CONTOUR.map((i) => targets[i]),
-    RIGHT_EYE_CONTOUR.map((i) => targets[i]),
-    shrink(LEFT_BROW.map((i) => targets[i]), 1.15),
-    shrink(RIGHT_BROW.map((i) => targets[i]), 1.15),
-  ], bx, by, bw, bh);
-  boxBlur(ownColour, bw, bh, Math.max(1, Math.round(faceW * 0.006)));
-  const face = transferDetail(
-    selfieData.data, warpedData.data, selfieSkin, sourceSkin, ownColour, bw, bh, radius, DETAIL_STRENGTH,
-  );
+  // Inside the eye openings the source's own colours are kept, so the whites stay white
+  // on any skin tone.
+  const eyes = fillPolygons([LEFT_EYE_CONTOUR, RIGHT_EYE_CONTOUR].map((c) => c.map((i) => targets[i])), bx, by, bw, bh);
+  boxBlur(eyes, bw, bh, Math.max(1, Math.round(faceW * 0.006)));
+  const face = transferDetail(selfieData.data, warpedData.data, {
+    selfieSkin, sourceSkin, eyes, brows: sourceFeatures.brows, w: bw, h: bh, radius,
+    detailStrength: DETAIL_STRENGTH, browDarken: BROW_DARKEN,
+  });
 
   // The foreground image is the new face only inside the outline and the selfie elsewhere,
   // so the wide, coarse pyramid levels can't drag the source's hair or background in.
@@ -379,45 +387,36 @@ function fillPolygons(polys, bx, by, bw, bh) {
   return a;
 }
 
-/** Convex hull (monotone chain) of a set of points, in order. */
-function convexHull(points) {
-  const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const half = (list) => {
-    const out = [];
-    for (const p of list) {
-      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
-      out.push(p);
+/**
+ * Soft masks (0..1) over the crop box for the brows, eyes, upper lids and lips: each landmark contour
+ * is filled and stroked with a round pen to grow it by `dilate` px, then feathered.
+ * Returns the union of all features and the brows on their own.
+ */
+function featureMask(pts, bx, by, bw, bh, dilate) {
+  const draw = (contours) => {
+    const c = document.createElement('canvas');
+    c.width = bw;
+    c.height = bh;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = ctx.strokeStyle = '#fff';
+    ctx.lineWidth = dilate * 2;
+    ctx.lineJoin = ctx.lineCap = 'round';
+    for (const idx of contours) {
+      ctx.beginPath();
+      idx.forEach((i, k) => (k ? ctx.lineTo(pts[i][0] - bx, pts[i][1] - by) : ctx.moveTo(pts[i][0] - bx, pts[i][1] - by)));
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
     }
-    out.pop();
-    return out;
+    const rgba = ctx.getImageData(0, 0, bw, bh).data;
+    const a = new Float32Array(bw * bh);
+    for (let i = 0; i < a.length; i++) a[i] = rgba[i * 4 + 3] / 255;
+    return boxBlur(a, bw, bh, Math.max(1, Math.round(dilate / 2)), 2);
   };
-  return half(pts).concat(half(pts.reverse()));
-}
-
-/** 0..1 weight over the crop box: inside the face oval, with eyes, brows and lips cut out. */
-function skinWeight(pts, bx, by, bw, bh) {
-  const c = document.createElement('canvas');
-  c.width = bw;
-  c.height = bh;
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  const trace = (poly) => {
-    ctx.beginPath();
-    poly.forEach(([x, y], i) => (i ? ctx.lineTo(x - bx, y - by) : ctx.moveTo(x - bx, y - by)));
-    ctx.closePath();
-    ctx.fill();
+  return {
+    all: draw([LEFT_BROW, RIGHT_BROW, LEFT_LID, RIGHT_LID, LEFT_EYE_CONTOUR, RIGHT_EYE_CONTOUR, LIPS]),
+    brows: draw([LEFT_BROW, RIGHT_BROW]),
   };
-  ctx.fillStyle = '#fff';
-  trace(shrink(FACE_OVAL.map((i) => pts[i]), 0.92));
-  ctx.globalCompositeOperation = 'destination-out';
-  for (const f of FEATURES) {
-    const poly = f.idx.map((i) => pts[i]);
-    trace(shrink(f.hull ? convexHull(poly) : poly, f.scale));
-  }
-  const rgba = ctx.getImageData(0, 0, bw, bh).data;
-  const a = new Float32Array(bw * bh);
-  for (let i = 0; i < a.length; i++) a[i] = rgba[i * 4 + 3] / 255;
-  return a;
 }
 
 /**

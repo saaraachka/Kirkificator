@@ -144,28 +144,41 @@ function skinLowPass(rgba, weight, w, h, r) {
   };
 }
 
-/** How far the kept eye and brow regions shift toward the selfie's skin tone and lighting. */
+/** How far the kept eye regions (and the brows' tint) shift toward the selfie's skin tone and lighting. */
 const EYE_ADAPT = 0.35;
 
 /**
  * Frequency-separation face transfer, computed in Lab:
  *   face = selfie_lowfreq + (source - source_lowfreq) * detailStrength
- * The low-frequency layers are skin-only blurs, so the result takes the selfie's skin
- * tone, lighting and shading, and only the source contributes features and texture.
- * Where `keep` is set (eyes and brows) the source's own colours are used instead,
- * shifted only part way toward the selfie's lighting, so the whites of the eyes stay
- * white and the brows keep their hair colour rather than taking the skin's tone.
+ * The low-frequency layers are masked, normalised blurs of skin only, so the result takes
+ * the selfie's skin tone, lighting and shading, and only the source contributes features
+ * and texture.
+ *
+ * Two feature-specific tweaks:
+ * - brows: the lightness detail is scaled by `browDarken`, and the colour tint comes from
+ *   the source's own brow hair (lightly adapted) rather than "brow minus skin" chroma,
+ *   which turns teal on warmer or darker skin. Lightness always comes from the detail
+ *   layer, so the brow stays solid with no lighter core or outline.
+ * - eyes: inside the eye openings the source's own colours are kept, shifted only part way
+ *   toward the selfie's lighting, so the whites stay white on any skin tone.
  * @param {Uint8ClampedArray} selfie RGBA
  * @param {Uint8ClampedArray} warped RGBA, the source face warped into place
- * @param {Float32Array} selfieSkin 0..1 weight: the selfie's skin, features cut out
- * @param {Float32Array} sourceSkin 0..1 weight: the source's skin, features cut out
- * @param {Float32Array} keep 0..1 weight where the source's own colours are kept
- * @param {number} radius blur radius in px
+ * @param {object} o
+ * @param {Float32Array} o.selfieSkin 0..1 weight: the selfie's skin, features masked out
+ * @param {Float32Array} o.sourceSkin 0..1 weight: the source's skin, features masked out
+ * @param {Float32Array} o.eyes 0..1 weight: the source's eye openings
+ * @param {Float32Array} o.brows 0..1 weight: the source's eyebrows
+ * @param {number} o.w
+ * @param {number} o.h
+ * @param {number} o.radius blur radius in px
+ * @param {number} o.detailStrength
+ * @param {number} o.browDarken
  * @returns {Float32Array} float RGB (0..255); selfie pixels where nothing was warped
  */
-export function transferDetail(selfie, warped, selfieSkin, sourceSkin, keep, w, h, radius, detailStrength) {
-  const selfieLow = skinLowPass(selfie, selfieSkin, w, h, radius);
-  const sourceLow = skinLowPass(warped, sourceSkin, w, h, radius);
+export function transferDetail(selfie, warped, o) {
+  const { w, h, eyes, brows, detailStrength, browDarken } = o;
+  const selfieLow = skinLowPass(selfie, o.selfieSkin, w, h, o.radius);
+  const sourceLow = skinLowPass(warped, o.sourceSkin, w, h, o.radius);
 
   const out = new Float32Array(w * h * 3);
   const src = new Float32Array(3), sLow = new Float32Array(3), wLow = new Float32Array(3), lab = new Float32Array(3);
@@ -181,12 +194,25 @@ export function transferDetail(selfie, warped, selfieSkin, sourceSkin, keep, w, 
       rgbToLab(warped[p * 4], warped[p * 4 + 1], warped[p * 4 + 2], src, 0);
       selfieLow(x, y, sLow);
       sourceLow(x, y, wLow);
-      const k = keep[p];
-      for (let c = 0; c < 3; c++) {
+      const b = brows[p], e = eyes[p];
+
+      // Lightness: detail layer, boosted or softened inside the brows.
+      const gainL = detailStrength * (1 + (browDarken - 1) * b);
+      lab[0] = sLow[0] + (src[0] - wLow[0]) * gainL;
+      // Tint: detail layer on skin, the source's own (adapted) hair colour in the brows.
+      for (let c = 1; c < 3; c++) {
         const separated = sLow[c] + (src[c] - wLow[c]) * detailStrength;
         const own = src[c] + (sLow[c] - wLow[c]) * EYE_ADAPT;
-        lab[c] = separated + (own - separated) * k;
+        lab[c] = separated + (own - separated) * b;
       }
+      // Eye openings: the source's own colours throughout.
+      if (e > 0) {
+        for (let c = 0; c < 3; c++) {
+          const own = src[c] + (sLow[c] - wLow[c]) * EYE_ADAPT;
+          lab[c] += (own - lab[c]) * e;
+        }
+      }
+
       const L = Math.min(100, Math.max(0, lab[0]));
       labToRgb(L, Math.min(127, Math.max(-128, lab[1])), Math.min(127, Math.max(-128, lab[2])), out, i);
       for (let c = 0; c < 3; c++) out[i + c] = Math.min(255, Math.max(0, out[i + c]));
