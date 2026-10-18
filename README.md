@@ -1,6 +1,6 @@
 # Kirkificator
 
-A Halloween fortune-teller prank. "Madame Sarah" reads your face with the front camera, makes a show of consulting the spirits, and then reveals your destiny: your selfie with someone else's face swapped onto it.
+A carnival sideshow prank. "Step Right Up" congratulates you on being selected for the main exhibit, takes your photo with the front camera, makes a show of preparing you for the collection, and then presents the new attraction: your selfie with someone else's face swapped onto it, stamped NO REFUNDS.
 
 It is a static site plus two Netlify Functions. The face swap itself is done by an AI face-swap model on [Replicate](https://replicate.com), called through the functions so the API token stays on the server. The browser first checks for a face with MediaPipe Face Landmarker (loaded as WebAssembly from a CDN), so photos without a face are never uploaded. If the AI swap fails or takes longer than 45 seconds, the app falls back to the original on-device swap (triangle-mesh warp, colour matching and blending in the browser), so a reading always finishes.
 
@@ -24,7 +24,7 @@ Files: `netlify/functions/swap-start.js` validates the upload (JPEG or PNG, 4 MB
 
 Put the face you want to swap in at `assets/source-face.jpg`. That path is fixed in `js/faceswap.js` (`SOURCE_FACE_URL`, for the on-device fallback) and `netlify/functions/swap-start.js` (`SOURCE_FACE_PATH`, which Replicate downloads).
 
-Pick a clear, front-facing, evenly lit photo with a neutral or closed-mouth expression and nothing covering the face (no hair over the forehead, no glasses if you can help it). Around 600 to 1200 px on the longest side is plenty; larger images are downscaled to 1024 px. If the face can't be detected the app shows a "crystal ball is clouded" error, so you'll know straight away.
+Pick a clear, front-facing, evenly lit photo with a neutral or closed-mouth expression and nothing covering the face (no hair over the forehead, no glasses if you can help it). Around 600 to 1200 px on the longest side is plenty; larger images are downscaled to 1024 px. If the face can't be detected the on-device fallback shows an "exhibit's star has no face" error, so you'll know straight away.
 
 The landmarks for the source face are computed once when the page loads, so swapping the image is just replacing the file and redeploying.
 
@@ -44,7 +44,9 @@ The on-device fallback is tuned with these, also at the top of `js/faceswap.js`:
 - `FEATHER` (default 0.08) is the width of the soft edge along the cheeks and jaw, as a fraction of face width.
 - `PYRAMID_LEVELS` (default 6) is the maximum number of levels used for multi-band blending. More levels spread colour and lighting differences over a wider area.
 
-The loading lines and their timing live at the top of `js/app.js` (`PROCESSING_LINES`, `LINE_MS`). `HOLD_LINES` repeat after the main lines for as long as the swap is still running.
+The loading lines and their timing live at the top of `js/app.js`. `PROCESSING_LINES` play in order. Each stays fully visible for `LINE_MS` (2.6 s), with a `FADE_MS` (0.7 s) fade in and out. At least `MIN_LINES` (3) are always shown. A line that is on screen when the result arrives finishes before the reveal. If the swap is still running when the list ends, the last line holds with a pulsing ellipsis. `OMINOUS_FROM` is the line where the marquee bulbs start to sputter.
+
+The theme lives in `css/styles.css`: colour tokens at the top, with paper texture and film grain made from CSS gradients and inline SVG noise (no image files).
 
 ## Running locally
 
@@ -61,7 +63,7 @@ To try it on a phone you need HTTPS. The easiest option is deploying, or a tunne
 
 ## How it works
 
-- `js/app.js` drives the screens: intro → camera with a 3-2-1 countdown → processing lines → result (or a themed error). While the lines play it checks for a face, tries the AI swap and falls back to the on-device swap if that fails. It also bakes the "YOUR DESTINY" stamp into the image and handles Save/Share via the Web Share API, falling back to a download.
+- `js/app.js` drives the screens: intro → camera → processing lines → result (or an error). The camera screen runs MediaPipe on the live preview a few times a second, and the oval guide glows gold and "TAKE IT" unlocks only while a face is found. Tapping it captures instantly with a flash, and the frozen shot waits for "USE IT" or "RETAKE", so nothing is uploaded until the user approves it. While the lines play it checks the shot for a face again, tries the AI swap and falls back to the on-device swap if that fails. It also bakes the "NO REFUNDS" ticket stamp into the image and handles Save/Share via the Web Share API, falling back to a download.
 - `js/camera.js` opens the front camera (`facingMode: 'user'`) and captures exactly the mirrored, cropped frame shown in the preview, capped at 960 px.
 - `js/faceswap.js` has the AI path (`swapFaceRemote`: downscale and upload, poll, then download the result into a canvas so it can be stamped and shared) and the face check (`hasFace`). The on-device fallback (`swapFace`) detects 468 face landmarks on both images, fits a single similarity transform (rotation, uniform scale, translation) from the source's eye centres, forehead and chin to the selfie's, and moves each source landmark there, nudged `SHAPE_BLEND` of the way toward the selfie landmark. An extra ring of points above and around the face oval carries the source's forehead and hairline along. The source points are Delaunay-triangulated once (`js/delaunay.js`) and each triangle is drawn onto its target with WebGL (falling back to Canvas 2D affine transforms without WebGL). The new face is built by frequency separation in Lab colour space (`js/blend.js`): the selfie's skin blurred by `LOWFREQ_RADIUS`, plus the source minus its own blurred skin. Both blurs are masked, normalised blurs of the face skin: a feature mask built from the landmarks (brows, eyes, upper lids and lips, slightly dilated and feathered) is left out of both, and skin colour is filled in smoothly underneath. That way the source's features keep their full darkness and colour in the detail layer, and the selfie's own features can't ghost through, so the result takes the selfie's skin tone, lighting and shading while the features come only from the source. Inside the eye openings the source's own colours are kept so the whites stay white on any skin tone, and the brows take their tint from the source's brow hair. The result is then combined with the selfie by multi-band blending. Both images are split into Laplacian pyramids and each band is blended through a matching Gaussian pyramid of the mask, so colour and lighting blend over a wide area while fine detail keeps a narrow edge. The mask follows the face oval, is eroded and blurred so it tapers to zero at the outline, and fades out across the forehead.
 

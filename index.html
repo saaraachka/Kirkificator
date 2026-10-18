@@ -3,67 +3,79 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#2a0628">
+  <meta name="theme-color" content="#140909">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="description" content="Madame Sarah will now read your face.">
-  <title>Madame Sarah</title>
+  <meta name="description" content="Congratulations. You've been selected for the main exhibit.">
+  <title>Step Right Up</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Rye&family=Special+Elite&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/styles.css">
   <script type="module" src="js/app.js"></script>
 </head>
-<body>
-  <div class="candlelight" aria-hidden="true"></div>
+<body data-screen="intro">
+  <div class="tent" aria-hidden="true"></div>
+  <div class="bulbs" aria-hidden="true">
+    <i style="--i:0"></i><i style="--i:1"></i><i style="--i:2"></i><i style="--i:3"></i><i style="--i:4"></i><i style="--i:5"></i>
+    <i style="--i:6"></i><i style="--i:7"></i><i style="--i:8"></i><i style="--i:9"></i><i style="--i:10"></i><i style="--i:11"></i>
+  </div>
+  <div class="grain" aria-hidden="true"></div>
 
   <main>
     <!-- 1. Intro -->
     <section id="screen-intro" class="screen active" aria-labelledby="intro-title">
-      <div class="ornament" aria-hidden="true">☾ ✦ ☽</div>
-      <p class="eyebrow">The tent of</p>
-      <h1 id="intro-title">Madame Sarah</h1>
-      <div class="crystal-ball" aria-hidden="true"><div class="mist"></div></div>
-      <p class="lede">Madame Sarah will now read your face.</p>
-      <p class="fine">Sit still, look into the glass, and let the spirits see you as you truly are.</p>
-      <button id="btn-begin" class="btn">Begin the reading</button>
-      <div class="candles" aria-hidden="true">
-        <span class="candle"><i></i></span><span class="candle tall"><i></i></span><span class="candle"><i></i></span>
+      <div class="poster">
+        <p class="ornament" aria-hidden="true">✦ ✦ ✦</p>
+        <h1 id="intro-title">CONGRATULATIONS</h1>
+        <hr class="rule" aria-hidden="true">
+        <p class="lede">You've been selected for the main exhibit. Nobody else wanted to go first.</p>
+        <button id="btn-begin" class="ticket">STEP RIGHT UP</button>
+        <p class="small-print">Your photo goes to an AI face-swap service and isn't stored here.</p>
       </div>
-      <p class="privacy">Your photo is sent to an AI face-swap service to make your reading. This site doesn't store it.</p>
     </section>
 
-    <!-- 2. Camera -->
+    <!-- 2. Camera: live preview, then the frozen shot to approve or retake -->
     <section id="screen-camera" class="screen" aria-label="Camera">
       <video id="video" autoplay playsinline muted></video>
-      <div class="face-guide" aria-hidden="true"></div>
-      <p class="camera-hint">Place your face within the oval</p>
-      <div id="countdown" class="countdown" aria-live="assertive"></div>
+      <canvas id="review" aria-label="Your photo"></canvas>
+      <div id="face-guide" class="face-guide" aria-hidden="true"></div>
+      <p class="camera-hint">Face in the frame. Act natural. Natural for you.</p>
+      <div class="camera-bar">
+        <button id="btn-take" class="ticket" disabled>TAKE IT</button>
+        <button id="btn-use" class="ticket">USE IT</button>
+        <button id="btn-retake" class="ticket ticket-cream">RETAKE</button>
+      </div>
       <div id="flash" class="flash" aria-hidden="true"></div>
     </section>
 
     <!-- 3. Processing -->
-    <section id="screen-processing" class="screen" aria-label="Reading in progress">
-      <div class="crystal-ball large" aria-hidden="true"><div class="mist"></div></div>
-      <p id="processing-line" class="processing-line" aria-live="polite">Consulting the spirits...</p>
+    <section id="screen-processing" class="screen" aria-label="Working on it">
+      <div class="carousel" aria-hidden="true"></div>
+      <div class="placard">
+        <p id="processing-line" class="processing-line" aria-live="polite"></p>
+      </div>
     </section>
 
     <!-- 4. Result -->
     <section id="screen-result" class="screen" aria-labelledby="result-title">
-      <h2 id="result-title">Your fate is sealed</h2>
-      <div class="frame"><img id="result-img" alt="Your destiny, as revealed by Madame Sarah"></div>
+      <h2 id="result-title"><span class="kicker">PRESENTING:</span> THE NEW ATTRACTION</h2>
+      <figure class="exhibit"><img id="result-img" alt="Your photo, as the new attraction"></figure>
       <div class="actions">
-        <button id="btn-share" class="btn">Save / Share</button>
-        <button id="btn-again" class="btn btn-ghost">Try again</button>
+        <button id="btn-share" class="ticket">SHOW THE OTHERS</button>
+        <button id="btn-again" class="ticket ticket-cream">AGAIN</button>
       </div>
-      <p class="fine">Or press and hold the image to save it.</p>
+      <p class="small-print on-dark">Or press and hold the picture to keep it.</p>
     </section>
 
     <!-- Errors (camera denied, no face, etc.) -->
     <section id="screen-error" class="screen" aria-labelledby="error-title">
-      <div class="ornament" aria-hidden="true">✧ ☠ ✧</div>
-      <h2 id="error-title">The veil is closed</h2>
-      <p id="error-message" class="lede"></p>
-      <button id="btn-retry" class="btn">Try again</button>
+      <div class="poster">
+        <p class="ornament" aria-hidden="true">✦ ✦ ✦</p>
+        <h2 id="error-title">INTERMISSION</h2>
+        <hr class="rule" aria-hidden="true">
+        <p id="error-message" class="lede"></p>
+        <button id="btn-retry" class="ticket">TRY AGAIN</button>
+      </div>
     </section>
   </main>
 </body>
