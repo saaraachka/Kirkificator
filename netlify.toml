@@ -1,0 +1,8 @@
+# Static site in the repo root, no build step, plus two Netlify Functions that keep
+# the Replicate API token server-side.
+[build]
+  command = ""
+  publish = "."
+
+[functions]
+  directory = "netlify/functions"

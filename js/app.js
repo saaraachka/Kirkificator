@@ -1,7 +1,7 @@
 // Screen flow: intro -> camera -> processing -> result (or a themed error).
 
 import { startCamera, stopCamera, captureFrame, CameraError } from './camera.js';
-import { initFaceSwap, swapFace, FaceSwapError } from './faceswap.js';
+import { initFaceSwap, hasFace, swapFace, swapFaceRemote, FaceSwapError } from './faceswap.js';
 
 const PROCESSING_LINES = [
   'Consulting the spirits...',
@@ -9,6 +9,12 @@ const PROCESSING_LINES = [
   'Analyzing bone structure...',
   'Reading the lines of fate...',
   'Something is wrong...',
+  'Oh no.',
+];
+// Repeated after PROCESSING_LINES, for as long as the swap is still running.
+const HOLD_LINES = [
+  'The spirits are arguing...',
+  'This has never happened before...',
   'Oh no.',
 ];
 const LINE_MS = 850;
@@ -87,12 +93,17 @@ async function runReading() {
   await processReading(selfie);
 }
 
-async function playProcessingLines() {
+/** Play every processing line once, then keep cycling HOLD_LINES until `until` settles. */
+async function playProcessingLines(until) {
+  let settled = false;
+  until.finally(() => { settled = true; });
   const screen = $('screen-processing');
   const line = $('processing-line');
   screen.classList.remove('ominous');
-  for (let i = 0; i < PROCESSING_LINES.length; i++) {
-    line.textContent = PROCESSING_LINES[i];
+  for (let i = 0; i < PROCESSING_LINES.length || !settled; i++) {
+    line.textContent = i < PROCESSING_LINES.length
+      ? PROCESSING_LINES[i]
+      : HOLD_LINES[(i - PROCESSING_LINES.length) % HOLD_LINES.length];
     line.classList.remove('swap');
     void line.offsetWidth;
     line.classList.add('swap');
@@ -101,13 +112,27 @@ async function playProcessingLines() {
   }
 }
 
+/**
+ * Check for a face on-device, then try the AI swap, falling back to the on-device swap
+ * if it fails or times out. Resolves to null if there is no face in the selfie.
+ */
+async function kirkify(selfie) {
+  if (!(await hasFace(selfie))) return null; // nothing is uploaded without a face
+  try {
+    return await swapFaceRemote(selfie);
+  } catch (err) {
+    console.warn('AI face swap failed, using the on-device swap instead:', err.cause || err);
+  }
+  return swapFace(selfie);
+}
+
 async function processReading(selfie) {
   show('processing');
-  const swap = swapFace(selfie).then(
+  const swap = kirkify(selfie).then(
     (canvas) => ({ canvas }),
     (error) => ({ error }),
   );
-  const [{ canvas, error }] = await Promise.all([swap, playProcessingLines()]);
+  const [{ canvas, error }] = await Promise.all([swap, playProcessingLines(swap)]);
   $('screen-processing').classList.remove('ominous');
 
   if (error) {

@@ -2,11 +2,27 @@
 
 A Halloween fortune-teller prank. "Madame Sarah" reads your face with the front camera, makes a show of consulting the spirits, and then reveals your destiny: your selfie with someone else's face swapped onto it.
 
-It is a static site with no backend. Face detection (MediaPipe Face Landmarker, loaded as WebAssembly from a CDN), the triangle-mesh warp, colour matching and blending all run in the browser, and no image is ever uploaded anywhere. The only network requests are for the page itself, the MediaPipe library and model, and the Google Fonts.
+It is a static site plus two Netlify Functions. The face swap itself is done by an AI face-swap model on [Replicate](https://replicate.com), called through the functions so the API token stays on the server. The browser first checks for a face with MediaPipe Face Landmarker (loaded as WebAssembly from a CDN), so photos without a face are never uploaded. If the AI swap fails or takes longer than 45 seconds, the app falls back to the original on-device swap (triangle-mesh warp, colour matching and blending in the browser), so a reading always finishes.
+
+## Setup on Netlify
+
+1. Connect this GitHub repo to a Netlify site. `netlify.toml` already sets everything: no build command, the repo root as the publish directory, and `netlify/functions` as the functions directory.
+2. In Netlify, under **Site configuration → Environment variables**, add:
+   - `REPLICATE_API_TOKEN` (required): your token from https://replicate.com/account/api-tokens. Never commit it to the repo.
+   - `REPLICATE_MODEL` (optional): which model to run, as `owner/name:version` or `owner/name`. It defaults to [`cdingram/face-swap`](https://replicate.com/cdingram/face-swap), pinned to a version. Another model only works as a drop-in if it takes the same inputs (`input_image` for the selfie, `swap_image` for the face) and returns one image URL. Otherwise change the input names in `netlify/functions/swap-start.js`.
+   Redeploy after changing environment variables.
+3. **Set a spending limit on Replicate** (Account → Billing). The functions are public endpoints, so anyone who finds the site can start swaps on your account.
+4. Write the site's URL to the NFC tag, e.g. `https://<your-site>.netlify.app/`. The camera needs HTTPS, which Netlify provides.
+
+GitHub Pages and other static hosts can't run the functions, so there the app always uses the on-device swap.
+
+Replicate downloads the source face from the deployed site at `/assets/source-face.jpg`, so that file has to be publicly reachable at the site's own address.
+
+Files: `netlify/functions/swap-start.js` validates the upload (JPEG or PNG, 4 MB at most) and starts a prediction, returning only its id. `netlify/functions/swap-status.js` returns only `{ status, outputUrl }` for a prediction. Netlify cuts sync functions off at about 10 seconds, so neither one waits for the model: the browser polls `swap-status` every 1.5 s.
 
 ## Adding or swapping the source face
 
-Put the face you want to swap in at `assets/source-face.jpg`. That path is fixed in `js/faceswap.js` (`SOURCE_FACE_URL`).
+Put the face you want to swap in at `assets/source-face.jpg`. That path is fixed in `js/faceswap.js` (`SOURCE_FACE_URL`, for the on-device fallback) and `netlify/functions/swap-start.js` (`SOURCE_FACE_PATH`, which Replicate downloads).
 
 Pick a clear, front-facing, evenly lit photo with a neutral or closed-mouth expression and nothing covering the face (no hair over the forehead, no glasses if you can help it). Around 600 to 1200 px on the longest side is plenty; larger images are downscaled to 1024 px. If the face can't be detected the app shows a "crystal ball is clouded" error, so you'll know straight away.
 
@@ -14,7 +30,9 @@ The landmarks for the source face are computed once when the page loads, so swap
 
 ## Tuning
 
-At the top of `js/faceswap.js`:
+The AI swap's settings are at the top of `js/faceswap.js`: `UPLOAD_MAX_SIZE` (1024 px) and `UPLOAD_QUALITY` (0.85) for the uploaded selfie, `POLL_MS` (1.5 s) and `REMOTE_TIMEOUT_MS` (45 s) for polling. A selfie that encodes larger than `UPLOAD_TARGET_BYTES` (256 KB) is re-encoded at lower quality, because Replicate recommends inline data URLs only for small files.
+
+The on-device fallback is tuned with these, also at the top of `js/faceswap.js`:
 
 - `BLEND_STRENGTH` (0 to 1, default 1) controls how strongly the source face replaces the selfie. 1 is a full paste, around 0.6 to 0.7 gives a subtler "something's off" look.
 - `SHAPE_BLEND` (0 to 1, default 0.35) controls how much the source face bends to fit the selfie. At 0 it is only rotated, scaled and moved onto the head, so it keeps its own proportions (the "kirkified" look). At 1 every landmark is pulled onto the selfie's, which ends up looking like the selfie person.
@@ -26,31 +44,25 @@ At the top of `js/faceswap.js`:
 - `FEATHER` (default 0.08) is the width of the soft edge along the cheeks and jaw, as a fraction of face width.
 - `PYRAMID_LEVELS` (default 6) is the maximum number of levels used for multi-band blending. More levels spread colour and lighting differences over a wider area.
 
-The loading lines and their timing live at the top of `js/app.js` (`PROCESSING_LINES`, `LINE_MS`).
+The loading lines and their timing live at the top of `js/app.js` (`PROCESSING_LINES`, `LINE_MS`). `HOLD_LINES` repeat after the main lines for as long as the swap is still running.
 
 ## Running locally
 
-Camera access needs a secure context. `localhost` counts, so any static server works for desktop testing:
+The functions need the Netlify CLI. Camera access needs a secure context, and `localhost` counts:
 
 ```sh
-python3 -m http.server 8000
-# open http://localhost:8000
+npx netlify-cli dev
+# open http://localhost:8888
 ```
 
-To try it on a phone you need HTTPS. The easiest options are deploying (below) or a tunnel such as `npx localtunnel --port 8000` or `cloudflared tunnel --url http://localhost:8000`.
+`netlify dev` reads `REPLICATE_API_TOKEN` from a local `.env` file (ignored by git) or from the linked Netlify site. Locally the AI swap can't succeed anyway: Replicate has to download the source face from the site's own URL, and it can't reach `localhost`. You'll get the on-device fallback, which is also the quickest way to test that path. To test the AI path, deploy (a Netlify deploy preview works).
 
-## Deploying
-
-The site is plain files in the repo root (`index.html`, `css/`, `js/`, `assets/`), with no build step. Both GitHub Pages and Netlify serve over HTTPS, which the camera requires.
-
-**GitHub Pages:** push to GitHub, then go to Settings → Pages, set the source to "Deploy from a branch", pick your branch and the `/ (root)` folder, and save. The site appears at `https://<user>.github.io/<repo>/` within a minute or two. All paths in the app are relative, so it works from a sub-path.
-
-**Netlify:** either drag the project folder onto https://app.netlify.com/drop, or connect the repo with the build command left empty and the publish directory set to the repo root.
+To try it on a phone you need HTTPS. The easiest option is deploying, or a tunnel such as `cloudflared tunnel --url http://localhost:8888`.
 
 ## How it works
 
-- `js/app.js` drives the screens: intro → camera with a 3-2-1 countdown → processing lines → result (or a themed error). It also bakes the "YOUR DESTINY" stamp into the image and handles Save/Share via the Web Share API, falling back to a download.
+- `js/app.js` drives the screens: intro → camera with a 3-2-1 countdown → processing lines → result (or a themed error). While the lines play it checks for a face, tries the AI swap and falls back to the on-device swap if that fails. It also bakes the "YOUR DESTINY" stamp into the image and handles Save/Share via the Web Share API, falling back to a download.
 - `js/camera.js` opens the front camera (`facingMode: 'user'`) and captures exactly the mirrored, cropped frame shown in the preview, capped at 960 px.
-- `js/faceswap.js` detects 468 face landmarks on both images, fits a single similarity transform (rotation, uniform scale, translation) from the source's eye centres, forehead and chin to the selfie's, and moves each source landmark there, nudged `SHAPE_BLEND` of the way toward the selfie landmark. An extra ring of points above and around the face oval carries the source's forehead and hairline along. The source points are Delaunay-triangulated once (`js/delaunay.js`) and each triangle is drawn onto its target with WebGL (falling back to Canvas 2D affine transforms without WebGL). The new face is built by frequency separation in Lab colour space (`js/blend.js`): the selfie's skin blurred by `LOWFREQ_RADIUS`, plus the source minus its own blurred skin. Both blurs are masked, normalised blurs of the face skin: a feature mask built from the landmarks (brows, eyes, upper lids and lips, slightly dilated and feathered) is left out of both, and skin colour is filled in smoothly underneath. That way the source's features keep their full darkness and colour in the detail layer, and the selfie's own features can't ghost through, so the result takes the selfie's skin tone, lighting and shading while the features come only from the source. Inside the eye openings the source's own colours are kept so the whites stay white on any skin tone, and the brows take their tint from the source's brow hair. The result is then combined with the selfie by multi-band blending. Both images are split into Laplacian pyramids and each band is blended through a matching Gaussian pyramid of the mask, so colour and lighting blend over a wide area while fine detail keeps a narrow edge. The mask follows the face oval, is eroded and blurred so it tapers to zero at the outline, and fades out across the forehead.
+- `js/faceswap.js` has the AI path (`swapFaceRemote`: downscale and upload, poll, then download the result into a canvas so it can be stamped and shared) and the face check (`hasFace`). The on-device fallback (`swapFace`) detects 468 face landmarks on both images, fits a single similarity transform (rotation, uniform scale, translation) from the source's eye centres, forehead and chin to the selfie's, and moves each source landmark there, nudged `SHAPE_BLEND` of the way toward the selfie landmark. An extra ring of points above and around the face oval carries the source's forehead and hairline along. The source points are Delaunay-triangulated once (`js/delaunay.js`) and each triangle is drawn onto its target with WebGL (falling back to Canvas 2D affine transforms without WebGL). The new face is built by frequency separation in Lab colour space (`js/blend.js`): the selfie's skin blurred by `LOWFREQ_RADIUS`, plus the source minus its own blurred skin. Both blurs are masked, normalised blurs of the face skin: a feature mask built from the landmarks (brows, eyes, upper lids and lips, slightly dilated and feathered) is left out of both, and skin colour is filled in smoothly underneath. That way the source's features keep their full darkness and colour in the detail layer, and the selfie's own features can't ghost through, so the result takes the selfie's skin tone, lighting and shading while the features come only from the source. Inside the eye openings the source's own colours are kept so the whites stay white on any skin tone, and the brows take their tint from the source's brow hair. The result is then combined with the selfie by multi-band blending. Both images are split into Laplacian pyramids and each band is blended through a matching Gaussian pyramid of the mask, so colour and lighting blend over a wide area while fine detail keeps a narrow edge. The mask follows the face oval, is eroded and blurred so it tapers to zero at the outline, and fades out across the forehead.
 
 Tested in Chromium; it targets iOS Safari 15+ and current Android Chrome. On iOS the Web Share sheet offers "Save Image"; on browsers without file sharing the image downloads instead, and press-and-hold on the result image also works.

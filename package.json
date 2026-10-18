@@ -1,0 +1,6 @@
+{
+  "name": "kirkificator",
+  "private": true,
+  "type": "module",
+  "description": "Netlify Functions run as ES modules; the site itself has no build step or dependencies."
+}

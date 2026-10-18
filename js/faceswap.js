@@ -1,6 +1,8 @@
-// Face swap: MediaPipe Face Landmarker + piecewise-affine triangle warp,
-// frequency separation (source detail on the selfie's skin and lighting) and
-// multi-band blending. Everything runs on-device.
+// Face swap. The main path is an AI face-swap model on Replicate, reached through the
+// site's Netlify Functions (swapFaceRemote). The fallback runs on-device (swapFace):
+// MediaPipe Face Landmarker + piecewise-affine triangle warp, frequency separation
+// (source detail on the selfie's skin and lighting) and multi-band blending.
+// MediaPipe also checks there is a face in the selfie before anything is uploaded (hasFace).
 
 import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 import { triangulate } from './delaunay.js';
@@ -86,20 +88,40 @@ const RIGHT_LID = [263, 466, 388, 387, 386, 385, 384, 398, 362, 285, 295, 282, 2
 /** How far the feature mask is grown beyond the landmark contours, as a fraction of face width. */
 const FEATURE_DILATE = 0.015;
 
+// Remote (AI) swap.
+const SWAP_START_URL = '/.netlify/functions/swap-start';
+const SWAP_STATUS_URL = '/.netlify/functions/swap-status';
+const UPLOAD_MAX_SIZE = 1024; // longest side of the uploaded selfie, in px
+const UPLOAD_QUALITY = 0.85;
+// Replicate recommends data URLs only for small files; step the quality down if a selfie comes out larger.
+const UPLOAD_TARGET_BYTES = 256 * 1024;
+const POLL_MS = 1500;
+const REMOTE_TIMEOUT_MS = 45000;
+
 export class FaceSwapError extends Error {
   constructor(kind, cause) {
     super(kind);
-    this.kind = kind; // 'model' | 'source-missing' | 'source-no-face'
+    this.kind = kind; // 'model' | 'source-missing' | 'source-no-face' | 'remote'
     this.cause = cause;
   }
 }
 
+let landmarkerPromise = null;
 let initPromise = null;
 let landmarker = null;
 let source = null; // { canvas, uvs, triangles }
 let warper = null;
 
-/** Load the model and precompute the source face. Safe to call repeatedly. */
+/** Load the face landmark model. Safe to call repeatedly. */
+function initLandmarker() {
+  if (!landmarkerPromise) {
+    landmarkerPromise = createLandmarker().then((lm) => { landmarker = lm; });
+    landmarkerPromise.catch(() => { landmarkerPromise = null; }); // allow a later retry
+  }
+  return landmarkerPromise;
+}
+
+/** Load the model and precompute the source face for the on-device swap. Safe to call repeatedly. */
 export function initFaceSwap() {
   if (!initPromise) {
     initPromise = doInit();
@@ -109,8 +131,7 @@ export function initFaceSwap() {
 }
 
 async function doInit() {
-  const [lm, img] = await Promise.all([createLandmarker(), loadSourceImage()]);
-  landmarker = lm;
+  const [, img] = await Promise.all([initLandmarker(), loadSourceImage()]);
 
   const scale = Math.min(1, MAX_SOURCE_SIZE / Math.max(img.naturalWidth, img.naturalHeight));
   const canvas = document.createElement('canvas');
@@ -224,8 +245,93 @@ function detect(canvas) {
   return face && face.length >= MESH_POINTS ? face.slice(0, MESH_POINTS) : null;
 }
 
+/** True if MediaPipe finds a face in the image. Runs before upload, so faceless photos cost nothing. */
+export async function hasFace(canvas) {
+  await initLandmarker();
+  return detect(canvas) !== null;
+}
+
 /**
- * Swap the source face onto the selfie.
+ * Swap the face with the AI model: upload the selfie, poll until the prediction is done
+ * (or REMOTE_TIMEOUT_MS passes), then download the result into a canvas.
+ * Throws FaceSwapError('remote') on any failure, so the caller can fall back to swapFace.
+ * @param {HTMLCanvasElement} selfie
+ * @returns {Promise<HTMLCanvasElement>}
+ */
+export async function swapFaceRemote(selfie) {
+  const deadline = Date.now() + REMOTE_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('Timed out')), REMOTE_TIMEOUT_MS);
+  const { signal } = controller;
+  try {
+    const start = await fetchJson(SWAP_START_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: encodeForUpload(selfie) }),
+      signal,
+    });
+    if (typeof start.id !== 'string') throw new Error('No prediction id');
+
+    let outputUrl = null;
+    while (!outputUrl) {
+      await sleep(POLL_MS, signal);
+      if (Date.now() > deadline) throw new Error('Timed out');
+      const { status, outputUrl: url } = await fetchJson(`${SWAP_STATUS_URL}?id=${encodeURIComponent(start.id)}`, { signal });
+      if (status === 'succeeded' && url) outputUrl = url;
+      else if (status === 'failed' || status === 'canceled' || status === 'succeeded') throw new Error(`Prediction ${status}`);
+    }
+
+    // Fetch into a blob rather than pointing an <img> at the URL, so the canvas isn't
+    // cross-origin tainted and Save/Share gets a real file.
+    const res = await fetch(outputUrl, { signal });
+    if (!res.ok) throw new Error(`Output download failed (${res.status})`);
+    const bitmap = await createImageBitmap(await res.blob());
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    return canvas;
+  } catch (err) {
+    throw new FaceSwapError('remote', err);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The selfie as a JPEG data URL, at most UPLOAD_MAX_SIZE px on its long side. */
+function encodeForUpload(selfie) {
+  const scale = Math.min(1, UPLOAD_MAX_SIZE / Math.max(selfie.width, selfie.height));
+  let canvas = selfie;
+  if (scale < 1) {
+    canvas = document.createElement('canvas');
+    canvas.width = Math.round(selfie.width * scale);
+    canvas.height = Math.round(selfie.height * scale);
+    canvas.getContext('2d').drawImage(selfie, 0, 0, canvas.width, canvas.height);
+  }
+  let url = canvas.toDataURL('image/jpeg', UPLOAD_QUALITY);
+  for (let q = UPLOAD_QUALITY - 0.1; q >= 0.55 && url.length * 0.75 > UPLOAD_TARGET_BYTES; q -= 0.1) {
+    url = canvas.toDataURL('image/jpeg', q);
+  }
+  return url;
+}
+
+async function fetchJson(url, init) {
+  const res = await fetch(url, init);
+  if (!res.ok) throw new Error(`${url} responded ${res.status}`);
+  return res.json();
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason); }, { once: true });
+  });
+}
+
+/**
+ * Swap the source face onto the selfie on-device (the fallback when the AI swap fails).
  * @param {HTMLCanvasElement} selfie
  * @returns {Promise<HTMLCanvasElement|null>} the composited image, or null if no face was found
  */
