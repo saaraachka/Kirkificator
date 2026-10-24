@@ -1,21 +1,20 @@
 // Screen flow: intro -> camera (live preview, tap to capture, then use it or retake)
-// -> processing lines -> result (or an error).
+// -> clayface (the loading screen, js/clay.js) -> result (or an error).
 
 import { startCamera, stopCamera, captureFrame, CameraError } from './camera.js';
-import { initFaceSwap, hasFace, swapFace, swapFaceRemote, FaceSwapError } from './faceswap.js';
+import { initFaceSwap, hasFace, detectFace, swapFace, swapFaceRemote, FaceSwapError } from './faceswap.js';
+import { createClayStage, MIN_KNEAD_MS, CLAY_IN_MS } from './clay.js';
 
-const PROCESSING_LINES = [
-  'Measuring your skull for the collection...',
-  'The ringmaster has seen your photo. He has notes.',
+// Shown one at a time over the kneading, then looped.
+const KNEAD_LINES = [
+  "Hold still. We're working with what we've got.",
+  'The sculptor has asked for more clay.',
   'Removing your soul. Please do not move.',
-  "Consulting the bearded lady. She's not convinced.",
   "This is taking longer than usual. That's not a good sign.",
-  "We're so sorry about what happens next.",
+  "Almost done. That's a lie.",
 ];
 const LINE_MS = 2600; // how long each line stays fully visible
-const FADE_MS = 700; // matches the .processing-line opacity transition
-const MIN_LINES = 3; // always shown, however fast the swap is
-const OMINOUS_FROM = 4; // index of the first line where the bulbs start to sputter
+const FADE_MS = 900; // matches the .knead-line opacity transition
 
 const FACE_CHECK_MS = 250; // how often the live preview is checked for a face
 const PROBE_WIDTH = 256; // the preview is downscaled to this width for detection
@@ -28,6 +27,8 @@ const cameraScreen = $('screen-camera');
 
 let resultBlob = null;
 let resultUrl = null;
+let videoBlob = null;
+let videoUrl = null;
 let selfie = null; // the captured frame awaiting "USE IT"
 let watchId = 0; // bumped to stop the live face check
 let opening = false; // guards against double taps opening the camera twice
@@ -44,7 +45,6 @@ function show(name) {
 function showError(message, button = 'TRY AGAIN') {
   stopWatching();
   stopCamera();
-  document.body.classList.remove('ominous');
   $('error-title').textContent = ERROR_TITLE;
   $('error-message').textContent = message;
   $('btn-retry').textContent = button;
@@ -158,50 +158,36 @@ async function usePhoto() {
 }
 
 // ---------------------------------------------------------------------------
-// Processing
+// Processing: the clayface
 // ---------------------------------------------------------------------------
 
 /**
- * Show each line for at least LINE_MS with a slow fade. Once `until` settles (and at least
- * MIN_LINES have been shown) the current line finishes and the sequence stops. If the
- * swap outlasts the list, the last line stays up with a pulsing ellipsis.
+ * One line at a time at the bottom of the kneading, each held for LINE_MS with a slow
+ * fade, looping through KNEAD_LINES until stop() is called.
  */
-async function playProcessingLines(until) {
-  let settled = false;
-  until.finally(() => { settled = true; });
-  const line = $('processing-line');
-  for (let i = 0; i < PROCESSING_LINES.length; i++) {
-    const last = i === PROCESSING_LINES.length - 1;
-    line.textContent = PROCESSING_LINES[i];
-    document.body.classList.toggle('ominous', i >= OMINOUS_FROM);
-    line.classList.add('show');
-    await wait(FADE_MS + LINE_MS);
-    if (last && !settled) {
-      line.textContent = line.textContent.replace(/\.+$/, ''); // the ellipsis replaces the full stop
-      line.append(ellipsis());
-      await until;
+function startKneadLines() {
+  const line = $('knead-line');
+  let stopped = false;
+  (async () => {
+    for (let i = 0; !stopped; i = (i + 1) % KNEAD_LINES.length) {
+      line.textContent = KNEAD_LINES[i];
+      line.classList.add('show');
+      await wait(FADE_MS + LINE_MS);
+      line.classList.remove('show');
+      await wait(FADE_MS);
     }
+  })();
+  return () => {
+    stopped = true;
     line.classList.remove('show');
-    await wait(FADE_MS);
-    if (settled && i + 1 >= MIN_LINES) break;
-  }
-  line.textContent = '';
-}
-
-function ellipsis() {
-  const span = document.createElement('span');
-  span.className = 'ellipsis';
-  span.setAttribute('aria-hidden', 'true');
-  span.innerHTML = '<i>.</i><i>.</i><i>.</i>';
-  return span;
+  };
 }
 
 /**
- * Check for a face on-device, then try the AI swap, falling back to the on-device swap
- * if it fails or times out. Resolves to null if there is no face in the selfie.
+ * Try the AI swap, falling back to the on-device swap if it fails or times out.
+ * Only called once a face has been found, so nothing faceless is uploaded.
  */
 async function kirkify(selfie) {
-  if (!(await hasFace(selfie))) return null; // nothing is uploaded without a face
   try {
     return await swapFaceRemote(selfie);
   } catch (err) {
@@ -210,46 +196,120 @@ async function kirkify(selfie) {
   return swapFace(selfie);
 }
 
-async function processPhoto(selfie) {
-  show('processing');
-  const swap = kirkify(selfie).then(
-    (canvas) => ({ canvas }),
-    (error) => ({ error }),
-  );
-  const [{ canvas, error }] = await Promise.all([swap, playProcessingLines(swap)]);
-  document.body.classList.remove('ominous');
+/** `image` redrawn at exactly w x h (the AI output can come back a few pixels off). */
+function fitTo(image, w, h) {
+  if (image.width === w && image.height === h) return image;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d').drawImage(image, 0, 0, w, h);
+  return c;
+}
 
-  if (error) {
-    console.error(error);
-    const kind = error instanceof FaceSwapError ? error.kind : 'unknown';
+function copyCanvas(image) {
+  const c = document.createElement('canvas');
+  c.width = image.width;
+  c.height = image.height;
+  c.getContext('2d').drawImage(image, 0, 0);
+  return c;
+}
+
+/** A fresh full-screen canvas for the clay stage (a canvas can only ever hold one context type). */
+function freshStage() {
+  const host = $('clay-host');
+  host.replaceChildren();
+  const canvas = document.createElement('canvas');
+  canvas.className = 'clay-stage';
+  canvas.setAttribute('aria-label', 'Your face, being remodelled');
+  host.append(canvas);
+  return canvas;
+}
+
+async function processPhoto(selfie) {
+  let landmarks;
+  try {
+    landmarks = await detectFace(selfie);
+  } catch (err) {
+    console.error(err);
+    showError("We couldn't load the face detector. Check your connection and try again.");
+    return;
+  }
+  if (!landmarks) {
+    showError("The camera saw nothing. That's either a lighting problem or a you problem.");
+    return;
+  }
+
+  show('processing');
+  const startedAt = performance.now();
+  let stopLines = null;
+  const onPhase = (phase) => {
+    document.body.dataset.clay = phase;
+    if (phase === 'knead' && !stopLines) stopLines = startKneadLines();
+    if (phase === 'become' && stopLines) stopLines();
+  };
+  let stage = null;
+  try {
+    stage = createClayStage(freshStage(), selfie, landmarks, { onPhase });
+  } catch (err) {
+    console.error('Clayface unavailable:', err);
+    stopLines = startKneadLines();
+  }
+
+  const { canvas, error } = await kirkify(selfie).then((c) => ({ canvas: c }), (e) => ({ error: e }));
+  if (error || !canvas) {
+    stage?.destroy();
+    stopLines?.();
+    if (error) console.error(error);
+    const kind = error instanceof FaceSwapError ? error.kind : error ? 'unknown' : 'none';
     const messages = {
       model: "We couldn't load the face detector. Check your connection and try again.",
       'source-missing': 'The exhibit is missing its star. (Missing assets/source-face.jpg.)',
       'source-no-face': "The exhibit's star has no face. (No face found in assets/source-face.jpg.)",
       unknown: 'Something broke backstage. Try again.',
+      none: "The camera saw nothing. That's either a lighting problem or a you problem.",
     };
     showError(messages[kind]);
     return;
   }
-  if (!canvas) {
-    showError("The camera saw nothing. That's either a lighting problem or a you problem.");
-    return;
-  }
 
-  await stampNoRefunds(canvas);
-  resultBlob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.92));
+  const result = fitTo(canvas, selfie.width, selfie.height);
+  const stamped = copyCanvas(result);
+  await stampKirked(stamped);
+  resultBlob = await new Promise((r) => stamped.toBlob(r, 'image/jpeg', 0.92));
+
+  let video = null;
+  if (stage) {
+    const resultLandmarks = await detectFace(result).catch(() => null);
+    ({ video } = await stage.finish(result, resultLandmarks, stamped));
+  } else {
+    await wait(Math.max(0, startedAt + CLAY_IN_MS + MIN_KNEAD_MS - performance.now()));
+  }
+  stopLines?.();
+
   if (resultUrl) URL.revokeObjectURL(resultUrl);
   resultUrl = URL.createObjectURL(resultBlob);
   $('result-img').src = resultUrl;
+  if (videoUrl) URL.revokeObjectURL(videoUrl);
+  videoBlob = video;
+  videoUrl = video ? URL.createObjectURL(video) : null;
+  $('btn-share-video').hidden = !video;
   show('result');
+  stage?.destroy();
 }
 
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
 
-/** Bake a red rubber ticket stamp, "NO REFUNDS", into the image so it survives sharing. */
-async function stampNoRefunds(canvas) {
+const STAMP_LINES = ['YOU\u2019VE BEEN', 'KIRKED'];
+const STAMP_ANGLE = -0.14;
+
+/**
+ * Bake a red rubber ticket stamp, "YOU'VE BEEN KIRKED", into the image so it survives
+ * sharing. Two lines, sized so the whole stamp (rotated) fits in 88% of the image width,
+ * with a faint cream backing so it stays readable over red clothes or backgrounds.
+ */
+async function stampKirked(canvas) {
   const font = '"Rye", Georgia, serif';
   try {
     await document.fonts.load(`400 40px ${font}`);
@@ -257,24 +317,32 @@ async function stampNoRefunds(canvas) {
 
   const W = canvas.width;
   const H = canvas.height;
-  const text = 'NO REFUNDS';
-  const size = Math.round(Math.min(W, H) * 0.1);
   const stamp = document.createElement('canvas');
   const sctx = stamp.getContext('2d');
-  sctx.font = `400 ${size}px ${font}`;
-  const textW = sctx.measureText(text).width;
-  const padX = size * 0.95; // room for the notches
-  const padY = size * 0.5;
-  stamp.width = Math.ceil(textW + padX * 2);
-  stamp.height = Math.ceil(size + padY * 2);
+  const layout = (size) => {
+    sctx.font = `400 ${size}px ${font}`;
+    const textW = Math.max(...STAMP_LINES.map((l) => sctx.measureText(l).width));
+    const lineH = size * 1.12;
+    const w = Math.ceil(textW + size * 1.9); // room for the notches
+    const h = Math.ceil(lineH * STAMP_LINES.length + size * 1.0);
+    const c = Math.abs(Math.cos(STAMP_ANGLE)), s = Math.abs(Math.sin(STAMP_ANGLE));
+    return { size, lineH, w, h, rotW: w * c + h * s, rotH: w * s + h * c };
+  };
+  let L = layout(Math.round(Math.min(W, H) * 0.095));
+  while (L.rotW > W * 0.88 && L.size > 8) L = layout(L.size - 1);
+  stamp.width = L.w;
+  stamp.height = L.h;
+  const { size } = L;
 
   const ink = '#c0141c';
+  const lw = Math.max(2, size * 0.09);
+  const notch = Math.min(stamp.height * 0.16, size * 0.42);
+  sctx.fillStyle = 'rgba(239, 225, 192, 0.6)';
+  ticketPath(sctx, lw, lw, stamp.width - lw * 2, stamp.height - lw * 2, notch);
+  sctx.fill();
   sctx.strokeStyle = ink;
   sctx.fillStyle = ink;
-  const lw = Math.max(2, size * 0.09);
-  const notch = stamp.height * 0.2;
   sctx.lineWidth = lw;
-  ticketPath(sctx, lw, lw, stamp.width - lw * 2, stamp.height - lw * 2, notch);
   sctx.stroke();
   sctx.lineWidth = lw * 0.5;
   ticketPath(sctx, lw * 2.8, lw * 2.8, stamp.width - lw * 5.6, stamp.height - lw * 5.6, notch * 0.7);
@@ -282,7 +350,8 @@ async function stampNoRefunds(canvas) {
   sctx.font = `400 ${size}px ${font}`;
   sctx.textAlign = 'center';
   sctx.textBaseline = 'middle';
-  sctx.fillText(text, stamp.width / 2, stamp.height / 2 + size * 0.05);
+  const top = stamp.height / 2 - (L.lineH * (STAMP_LINES.length - 1)) / 2 + size * 0.05;
+  STAMP_LINES.forEach((line, i) => sctx.fillText(line, stamp.width / 2, top + i * L.lineH));
 
   // Worn-ink speckle.
   sctx.globalCompositeOperation = 'destination-out';
@@ -296,8 +365,8 @@ async function stampNoRefunds(canvas) {
 
   const ctx = canvas.getContext('2d');
   ctx.save();
-  ctx.translate(W * 0.5, H - stamp.height * 0.9 - H * 0.04);
-  ctx.rotate(-0.14);
+  ctx.translate(W * 0.5, H - L.rotH / 2 - H * 0.035);
+  ctx.rotate(STAMP_ANGLE);
   ctx.globalAlpha = 0.88;
   ctx.drawImage(stamp, -stamp.width / 2, -stamp.height / 2);
   ctx.restore();
@@ -318,12 +387,12 @@ function ticketPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-async function shareResult() {
-  if (!resultBlob) return;
-  const file = new File([resultBlob], 'the-new-attraction.jpg', { type: 'image/jpeg' });
+/** Share a file with the Web Share API, or download it where files can't be shared. */
+async function shareFile(blob, url, name, title) {
+  const file = new File([blob], name, { type: blob.type });
   if (navigator.canShare?.({ files: [file] })) {
     try {
-      await navigator.share({ files: [file], title: 'Presenting: the new attraction' });
+      await navigator.share({ files: [file], title });
       return;
     } catch (err) {
       if (err.name === 'AbortError') return; // user closed the share sheet
@@ -331,11 +400,21 @@ async function shareResult() {
     }
   }
   const a = document.createElement('a');
-  a.href = resultUrl;
-  a.download = 'the-new-attraction.jpg';
+  a.href = url;
+  a.download = name;
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+function shareResult() {
+  if (resultBlob) shareFile(resultBlob, resultUrl, 'the-new-attraction.jpg', 'Presenting: the new attraction');
+}
+
+function shareVideo() {
+  if (!videoBlob) return;
+  const ext = videoBlob.type.includes('mp4') ? 'mp4' : 'webm';
+  shareFile(videoBlob, videoUrl, `the-transformation.${ext}`, 'The transformation');
 }
 
 $('btn-begin').addEventListener('click', openCamera);
@@ -345,6 +424,7 @@ $('btn-use').addEventListener('click', usePhoto);
 $('btn-again').addEventListener('click', openCamera);
 $('btn-retry').addEventListener('click', openCamera);
 $('btn-share').addEventListener('click', shareResult);
+$('btn-share-video').addEventListener('click', shareVideo);
 
 // Release the camera if the page is backgrounded mid-capture.
 window.addEventListener('pagehide', () => {

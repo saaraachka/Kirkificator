@@ -251,6 +251,13 @@ export async function hasFace(canvas) {
   return detect(canvas) !== null;
 }
 
+/** The 468 face-mesh landmarks of the image in pixel coordinates, or null if there's no face. */
+export async function detectFace(canvas) {
+  await initLandmarker();
+  const landmarks = detect(canvas);
+  return landmarks ? landmarks.map((p) => [p.x * canvas.width, p.y * canvas.height]) : null;
+}
+
 /**
  * Swap the face with the AI model: upload the selfie, poll until the prediction is done
  * (or REMOTE_TIMEOUT_MS passes), then download the result into a canvas.

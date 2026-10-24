@@ -48,12 +48,10 @@
       <div id="flash" class="flash" aria-hidden="true"></div>
     </section>
 
-    <!-- 3. Processing -->
+    <!-- 3. Processing: the clayface (js/clay.js) -->
     <section id="screen-processing" class="screen" aria-label="Working on it">
-      <div class="carousel" aria-hidden="true"></div>
-      <div class="placard">
-        <p id="processing-line" class="processing-line" aria-live="polite"></p>
-      </div>
+      <div id="clay-host" class="clay-host"></div>
+      <p id="knead-line" class="knead-line" aria-live="polite"></p>
     </section>
 
     <!-- 4. Result -->
@@ -62,6 +60,7 @@
       <figure class="exhibit"><img id="result-img" alt="Your photo, as the new attraction"></figure>
       <div class="actions">
         <button id="btn-share" class="ticket">SHOW THE OTHERS</button>
+        <button id="btn-share-video" class="ticket ticket-wide" hidden>SHOW THE TRANSFORMATION</button>
         <button id="btn-again" class="ticket ticket-cream">AGAIN</button>
       </div>
       <p class="small-print on-dark">Or press and hold the picture to keep it.</p>

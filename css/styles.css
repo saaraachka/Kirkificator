@@ -87,13 +87,6 @@ body {
   animation: chase 2.4s ease-in-out infinite;
   animation-delay: calc(var(--i) * -0.2s);
 }
-/* From the fifth loading line on, the bulbs lose their nerve. */
-body.ominous .bulbs i {
-  background: radial-gradient(circle at 40% 35%, #ffd9d0, #ff5a48 45%, #7a0c10 85%);
-  box-shadow: 0 0 10px 3px rgba(255, 70, 50, 0.5);
-  animation: sputter 1.3s steps(2, jump-none) infinite;
-  animation-delay: calc(var(--i) * -0.37s);
-}
 
 .grain {
   position: fixed;
@@ -106,9 +99,13 @@ body.ominous .bulbs i {
   animation: grain 0.8s steps(4) infinite;
 }
 
-/* The camera is full-bleed: no tent or bulbs over the preview. */
+/* The camera and the clayface are full-bleed: no tent or bulbs over them. */
 body[data-screen="camera"] .tent,
-body[data-screen="camera"] .bulbs { display: none; }
+body[data-screen="camera"] .bulbs,
+body[data-screen="processing"] .tent,
+body[data-screen="processing"] .bulbs { display: none; }
+
+[hidden] { display: none !important; }
 
 /* ---------- Layout ---------- */
 
@@ -134,7 +131,7 @@ main {
 
 /* ---------- Paper poster with an ornate border ---------- */
 
-.poster, .placard {
+.poster {
   color: var(--ink);
   background-color: var(--cream);
   background-image:
@@ -348,56 +345,44 @@ h1 {
 .flash.go { animation: flash 0.45s ease-out; }
 #screen-camera.snap #review { animation: snap 0.35s ease-out; }
 
-/* ---------- Processing ---------- */
+/* ---------- Processing: the clayface ---------- */
 
-#screen-processing { gap: 28px; }
-/* Carousel canopy seen from below */
-.carousel {
-  position: relative;
-  width: 168px;
-  height: 168px;
-  border-radius: 50%;
-  background: repeating-conic-gradient(var(--oxblood) 0 15deg, var(--cream-aged) 15deg 30deg);
-  box-shadow: 0 0 0 5px var(--gold), 0 0 0 7px var(--ink), 0 0 40px rgba(240, 190, 80, 0.3);
-  animation: spin 10s linear infinite;
-}
-.carousel::after {
-  content: "";
+#screen-processing { padding: 0; background: #000; z-index: 3; }
+.clay-host, .clay-stage {
   position: absolute;
-  inset: 38%;
-  border-radius: 50%;
-  background: radial-gradient(circle at 40% 35%, var(--gold-light), var(--gold) 55%, var(--gold-dim));
-  box-shadow: 0 0 0 3px var(--ink);
-}
-body.ominous .carousel { animation-duration: 2.2s; }
-
-.placard {
+  inset: 0;
   width: 100%;
-  max-width: 360px;
-  min-height: 132px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 22px 26px;
-  box-shadow: inset 0 0 0 5px var(--cream), inset 0 0 0 7px var(--oxblood), 0 14px 40px rgba(0, 0, 0, 0.6);
-  transform: rotate(0.5deg);
+  height: 100%;
 }
-.processing-line {
-  margin: 0;
-  font-size: 1.22rem;
-  line-height: 1.45;
+.clay-stage { display: block; }
+
+/* One small carnival line at a time, low over the darkened vignette. */
+.knead-line {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: max(34px, calc(env(safe-area-inset-bottom) + 18px));
+  margin: 0 auto;
+  max-width: 340px;
+  padding: 10px 14px;
+  font-size: 1rem;
+  line-height: 1.4;
+  color: var(--cream);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  background: rgba(22, 12, 11, 0.55);
+  border-top: 2px solid var(--gold-dim);
+  border-bottom: 2px solid var(--gold-dim);
   opacity: 0;
-  transition: opacity 0.7s ease;
+  transition: opacity 0.9s ease;
+  pointer-events: none;
 }
-.processing-line.show { opacity: 1; }
-body.ominous .processing-line { color: var(--oxblood); }
-.ellipsis i { font-style: normal; animation: dot 1.8s ease-in-out infinite; }
-.ellipsis i:nth-child(2) { animation-delay: 0.3s; }
-.ellipsis i:nth-child(3) { animation-delay: 0.6s; }
+.knead-line.show { opacity: 1; }
 
 /* ---------- Result: a framed exhibit card ---------- */
 
-#screen-result { gap: 18px; }
+#screen-result { gap: 16px; }
+/* The single snap from the hardened clay into the result. */
+#screen-result.active { animation: snap-in 0.28s ease-out both; }
 #screen-result h2 {
   font-size: clamp(1.45rem, 7.4vw, 2.2rem);
   color: var(--gold-light);
@@ -460,13 +445,16 @@ body.ominous .processing-line { color: var(--oxblood); }
   outline: 2px solid var(--ink);
   -webkit-touch-callout: default;
 }
-.actions { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+.ticket-wide { font-size: 0.98rem; padding-left: 24px; padding-right: 46px; }
+.ticket-wide::after { right: 30px; }
+/* With three buttons, give the picture a little less height. */
+#screen-result:has(#btn-share-video:not([hidden])) #result-img { max-height: 42vh; max-height: 42dvh; }
 
 /* ---------- Animations ---------- */
 
 @keyframes fade-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes chase { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-@keyframes sputter { 0% { opacity: 1; } 50% { opacity: 0.15; } 100% { opacity: 0.9; } }
 @keyframes grain {
   0% { transform: translate(0, 0); } 25% { transform: translate(-22px, 14px); }
   50% { transform: translate(18px, -26px); } 75% { transform: translate(-10px, -12px); } 100% { transform: translate(0, 0); }
@@ -474,10 +462,9 @@ body.ominous .processing-line { color: var(--oxblood); }
 @keyframes nudge { 0%, 88%, 100% { transform: none; } 92% { transform: rotate(-2deg) scale(1.03); } 96% { transform: rotate(1.5deg) scale(1.03); } }
 @keyframes flash { from { opacity: 0.95; } to { opacity: 0; } }
 @keyframes snap { from { transform: scale(1.04); } to { transform: none; } }
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes dot { 0%, 100% { opacity: 0.15; } 50% { opacity: 1; } }
+@keyframes snap-in { from { opacity: 0.4; transform: scale(1.04); } to { opacity: 1; transform: none; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
-  .processing-line { transition-duration: 0.01ms; }
+  .knead-line { transition-duration: 0.3s; }
 }
