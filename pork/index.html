@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <title>Incoming Call</title>
+  <link rel="preload" as="image" href="../assets/pork/john-pork.jpg">
+  <link rel="stylesheet" href="pork.css">
+  <script src="pork.js" defer></script>
+</head>
+<body data-screen="incoming">
+  <!-- Shared backdrop: his photo, blurred and darkened -->
+  <div class="backdrop" aria-hidden="true"><div class="backdrop-img"></div></div>
+
+  <!-- 1. Incoming call -->
+  <section id="incoming" class="screen" aria-label="Incoming call">
+    <header class="caller">
+      <h1 class="caller-name" id="caller-name">John Pork</h1>
+      <p class="caller-label">mobile</p>
+    </header>
+
+    <div class="photo-wrap">
+      <span class="ring" aria-hidden="true"></span>
+      <span class="ring ring-2" aria-hidden="true"></span>
+      <div class="avatar" role="img" aria-label="John Pork"><span class="initials">JP</span></div>
+    </div>
+
+    <div class="quick">
+      <button class="quick-btn" type="button" tabindex="-1">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 9.2V13l2.6 1.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M5 4.6 3 6.6M19 4.6l2 2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span>Remind Me</span>
+      </button>
+      <button class="quick-btn" type="button" tabindex="-1">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4C7 4 3 7.3 3 11.4c0 2.3 1.3 4.4 3.3 5.7-.2 1.2-.8 2.4-1.8 3.3 2 0 3.7-.8 4.8-1.7.9.2 1.8.3 2.7.3 5 0 9-3.3 9-7.5S17 4 12 4Z" fill="currentColor"/></svg>
+        <span>Message</span>
+      </button>
+    </div>
+
+    <div class="answer">
+      <div class="answer-col">
+        <button id="btn-decline" class="round round-red" type="button" aria-label="Decline">
+          <svg class="handset handset-down" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8c1.5 2.9 3.8 5.2 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2Z" fill="currentColor"/></svg>
+        </button>
+        <span class="round-label">Decline</span>
+      </div>
+      <div class="answer-col">
+        <button id="btn-accept" class="round round-green" type="button" aria-label="Accept">
+          <svg class="handset" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8c1.5 2.9 3.8 5.2 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2Z" fill="currentColor"/></svg>
+        </button>
+        <span class="round-label">Accept</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. Video call -->
+  <section id="call" class="screen" aria-label="Video call">
+    <div class="feed" aria-hidden="true">
+      <div class="feed-initials">JP</div>
+      <div class="feed-img"></div>
+      <video id="feed-video" class="feed-video" muted playsinline loop preload="none"></video>
+    </div>
+    <div class="call-top">
+      <p class="call-name">John Pork</p>
+      <p class="call-timer" id="call-timer">00:00</p>
+    </div>
+
+    <div class="pip" aria-label="Your camera is off">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h9A1.5 1.5 0 0 1 15 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 3 16.5v-9Z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m15 10.5 5-3v9l-5-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      <span>Camera off</span>
+    </div>
+
+    <div class="controls">
+      <button class="ctl" type="button" tabindex="-1" aria-label="Mute" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button class="ctl" type="button" tabindex="-1" aria-label="Camera" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2.5" fill="currentColor"/><path d="m16 10.5 5-3v9l-5-3Z" fill="currentColor"/></svg>
+      </button>
+      <button class="ctl" type="button" tabindex="-1" aria-label="Speaker" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button id="btn-end" class="ctl ctl-end" type="button" aria-label="End">
+        <svg class="handset handset-down" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8c1.5 2.9 3.8 5.2 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2Z" fill="currentColor"/></svg>
+      </button>
+    </div>
+
+    <div class="banner" id="banner" role="status">
+      <div class="banner-icon"></div>
+      <div class="banner-text">
+        <p class="banner-head"><b>John Pork</b><span>now</span></p>
+        <p class="banner-body">John Pork wants to know where you are.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. Call ended -->
+  <section id="ended" class="screen" aria-label="Call ended">
+    <header class="caller">
+      <h1 class="caller-name">John Pork</h1>
+      <p class="caller-label">Call Ended</p>
+      <p class="caller-label ended-time" id="ended-time">00:00</p>
+    </header>
+  </section>
+
+  <!-- Black gap between calls -->
+  <div class="blackout" aria-hidden="true"></div>
+</body>
+</html>

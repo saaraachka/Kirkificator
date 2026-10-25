@@ -4,6 +4,10 @@ A carnival sideshow prank. "Step Right Up" congratulates you on being selected f
 
 It is a static site plus two Netlify Functions. The face swap itself is done by an AI face-swap model on [Replicate](https://replicate.com), called through the functions so the API token stays on the server. The browser first checks for a face with MediaPipe Face Landmarker (loaded as WebAssembly from a CDN), so photos without a face are never uploaded. If the AI swap fails or takes longer than 45 seconds, the app falls back to the original on-device swap (triangle-mesh warp, colour matching and blending in the browser), so a reading always finishes.
 
+## The John Pork call (`/pork`)
+
+A second, separate prank for a second NFC tag: `https://<your-site>/pork/` shows a fake iPhone incoming call from John Pork straight away, with no taps, camera or network calls. Accept opens a FaceTime-style video call that freezes after 6 seconds with a "John Pork wants to know where you are." banner. Decline and End both make him call back, as "John Pork (2)", "(3)" and then "(urgent)". It lives entirely in `pork/` (`index.html`, `pork.css`, `pork.js`) and shares nothing with the Kirkificator. Put his photo at `assets/pork/john-pork.jpg` and, optionally, a silent looping clip at `assets/pork/answer.mp4`. `assets/pork/README.md` has size and format tips. Without the photo it shows a grey "JP" avatar, and without the clip it shows the still. Timings are at the top of `pork/pork.js`.
+
 ## Setup on Netlify
 
 1. Connect this GitHub repo to a Netlify site. `netlify.toml` already sets everything: no build command, the repo root as the publish directory, and `netlify/functions` as the functions directory.
