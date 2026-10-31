@@ -301,13 +301,56 @@ h1 {
     inset 0 0 26px 4px rgba(240, 190, 80, 0.45);
 }
 #screen-camera.reviewing .face-guide,
-#screen-camera.reviewing .camera-hint { display: none; }
+#screen-camera.reviewing .camera-hint,
+#screen-camera.reviewing .flash-toggle { display: none; }
+
+/* Flash toggle: AUTO / ON / OFF. The bolt lights up when TAKE IT would fire the flash. */
+.flash-toggle {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  right: 14px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  padding: 0 12px 0 9px;
+  border: 1.5px solid var(--gold-dim);
+  border-radius: 20px;
+  background: rgba(22, 12, 11, 0.72);
+  color: var(--cream-aged);
+  font-family: var(--body);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+}
+.flash-toggle svg { width: 20px; height: 20px; }
+.flash-toggle .bolt { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
+.flash-toggle .slash { stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; display: none; }
+.flash-toggle[data-mode="off"] { color: rgba(220, 198, 151, 0.55); }
+.flash-toggle[data-mode="off"] .slash { display: inline; }
+.flash-toggle.armed { color: var(--gold-light); border-color: var(--gold); box-shadow: 0 0 14px rgba(240, 190, 80, 0.45); }
+.flash-toggle.armed .bolt { fill: var(--gold-light); stroke: var(--gold-light); }
+.flash-toggle:focus-visible { outline: 3px solid var(--cream); outline-offset: 3px; }
+
+/* The screen flash: covers everything (preview, UI, grain) at full brightness. */
+.screen-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+}
+.screen-flash.on { opacity: 1; pointer-events: auto; }
+body.flashing .grain { display: none; }
 
 .camera-hint {
   position: absolute;
   left: 16px;
   right: 16px;
-  top: max(22px, env(safe-area-inset-top));
+  top: calc(max(14px, env(safe-area-inset-top)) + 50px);
   margin: 0 auto;
   max-width: 340px;
   padding: 10px 14px;

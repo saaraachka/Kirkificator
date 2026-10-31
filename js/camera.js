@@ -41,6 +41,18 @@ export async function startCamera(video) {
   }
 }
 
+/**
+ * Turn the camera's torch on or off, where the active track offers one (some Android
+ * phones; front cameras rarely do). Fails silently everywhere else.
+ */
+export async function setTorch(on) {
+  try {
+    const track = stream?.getVideoTracks()[0];
+    if (!track?.getCapabilities?.().torch) return;
+    await track.applyConstraints({ advanced: [{ torch: on }] });
+  } catch { /* no torch here */ }
+}
+
 export function stopCamera() {
   if (stream) {
     stream.getTracks().forEach((t) => t.stop());

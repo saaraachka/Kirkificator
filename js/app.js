@@ -1,7 +1,7 @@
 // Screen flow: intro -> camera (live preview, tap to capture, then use it or retake)
 // -> clayface (the loading screen, js/clay.js) -> result (or an error).
 
-import { startCamera, stopCamera, captureFrame, CameraError } from './camera.js';
+import { startCamera, stopCamera, captureFrame, setTorch, CameraError } from './camera.js';
 import { initFaceSwap, hasFace, detectFace, swapFace, swapFaceRemote, FaceSwapError } from './faceswap.js';
 import { createClayStage, MIN_KNEAD_MS, CLAY_IN_MS } from './clay.js';
 
@@ -19,6 +19,18 @@ const FADE_MS = 900; // matches the .knead-line opacity transition
 const FACE_CHECK_MS = 250; // how often the live preview is checked for a face
 const PROBE_WIDTH = 256; // the preview is downscaled to this width for detection
 
+// Screen flash for the front camera (like a phone's front "flash"): the screen turns
+// warm white to light the face, then the frame is captured.
+/** AUTO fires the flash when the preview's average brightness (0-255) is below this. */
+const FLASH_AUTO_THRESHOLD = 60;
+/** How long the screen stays lit before capturing, so the camera's auto-exposure can adjust. */
+const FLASH_PRE_MS = 250;
+/** The flash colour: a warm white, kinder to skin than pure white. */
+const FLASH_COLOR = '#FFF6E8';
+const FLASH_FADE_MS = 150; // the light fades out over this long after the capture
+const FLASH_MODES = ['auto', 'on', 'off'];
+const FLASH_KEY = 'kirkificator.flash';
+
 const ERROR_TITLE = 'INTERMISSION';
 
 const $ = (id) => document.getElementById(id);
@@ -33,6 +45,9 @@ let selfie = null; // the captured frame awaiting "USE IT"
 let watchId = 0; // bumped to stop the live face check
 let opening = false; // guards against double taps opening the camera twice
 let processing = false; // guards against double taps on "USE IT"
+let capturing = false; // guards against double taps on "TAKE IT" while the flash is up
+let previewLuma = 255; // average brightness of the live preview, 0-255
+let flashMode = loadFlashMode();
 
 // Start loading the model and analysing the source face straight away, in the background.
 initFaceSwap().catch((err) => console.error('Face swap init failed:', err));
@@ -91,6 +106,90 @@ function setFaceFound(found) {
   $('btn-take').disabled = !found;
 }
 
+// ---------------------------------------------------------------------------
+// Screen flash
+// ---------------------------------------------------------------------------
+
+function loadFlashMode() {
+  try {
+    const saved = localStorage.getItem(FLASH_KEY);
+    if (FLASH_MODES.includes(saved)) return saved;
+  } catch { /* storage unavailable */ }
+  return 'auto';
+}
+
+function saveFlashMode(mode) {
+  try {
+    localStorage.setItem(FLASH_KEY, mode);
+  } catch { /* storage unavailable */ }
+}
+
+/** True if TAKE IT would fire the flash right now. */
+function flashWillFire() {
+  return flashMode === 'on' || (flashMode === 'auto' && previewLuma < FLASH_AUTO_THRESHOLD);
+}
+
+function updateFlashButton() {
+  const btn = $('btn-flash');
+  btn.dataset.mode = flashMode;
+  btn.classList.toggle('armed', flashWillFire());
+  btn.querySelector('.flash-mode').textContent = flashMode.toUpperCase();
+  btn.setAttribute('aria-label', `Flash: ${flashMode}`);
+}
+
+function cycleFlashMode() {
+  flashMode = FLASH_MODES[(FLASH_MODES.indexOf(flashMode) + 1) % FLASH_MODES.length];
+  saveFlashMode(flashMode);
+  updateFlashButton();
+}
+
+/** Average brightness (Rec. 601 luma) of the probe frame, sampling every 4th pixel. */
+function measureLuma(probe) {
+  const { data } = probe.getContext('2d').getImageData(0, 0, probe.width, probe.height);
+  let sum = 0, n = 0;
+  for (let i = 0; i < data.length; i += 16) {
+    sum += data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    n++;
+  }
+  return n ? sum / n : 255;
+}
+
+/** Resolve once the camera has delivered a new frame (or after a short timeout). */
+function nextVideoFrame() {
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(t); resolve(); };
+    const t = setTimeout(done, 100);
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(done);
+    else requestAnimationFrame(() => requestAnimationFrame(done));
+  });
+}
+
+/**
+ * Light the face with the screen: cover everything in warm white, give the camera's
+ * auto-exposure FLASH_PRE_MS to adjust, capture from the video element (so the overlay
+ * itself is never in the photo), then fade the light out. One flash, never repeated.
+ */
+async function captureWithFlash() {
+  const light = $('screen-flash');
+  const theme = document.querySelector('meta[name="theme-color"]');
+  const themeWas = theme?.content;
+  light.style.background = FLASH_COLOR;
+  light.style.transition = 'none';
+  light.classList.add('on');
+  document.body.classList.add('flashing');
+  if (theme) theme.content = FLASH_COLOR; // light the browser's own bars too
+  setTorch(true);
+  await wait(FLASH_PRE_MS);
+  await nextVideoFrame();
+  const shot = captureFrame(video);
+  setTorch(false);
+  light.style.transition = `opacity ${FLASH_FADE_MS}ms ease-out`;
+  light.classList.remove('on');
+  document.body.classList.remove('flashing');
+  if (theme && themeWas) theme.content = themeWas;
+  return shot;
+}
+
 /** Check the live preview for a face a few times a second; the shutter only works while one is found. */
 async function startWatching() {
   const id = ++watchId;
@@ -99,7 +198,9 @@ async function startWatching() {
     if (video.videoWidth) {
       probe.width = PROBE_WIDTH;
       probe.height = Math.round((PROBE_WIDTH * video.videoHeight) / video.videoWidth);
-      probe.getContext('2d').drawImage(video, 0, 0, probe.width, probe.height);
+      probe.getContext('2d', { willReadFrequently: true }).drawImage(video, 0, 0, probe.width, probe.height);
+      previewLuma = measureLuma(probe);
+      updateFlashButton();
       let found;
       try {
         found = await hasFace(probe);
@@ -119,17 +220,24 @@ function stopWatching() {
   watchId++;
 }
 
-function takePhoto() {
-  if ($('btn-take').disabled || !video.videoWidth) return;
+async function takePhoto() {
+  if ($('btn-take').disabled || !video.videoWidth || capturing) return;
+  capturing = true;
   stopWatching();
-  selfie = captureFrame(video);
+  const flashFired = flashWillFire();
+  try {
+    selfie = flashFired ? await captureWithFlash() : captureFrame(video);
+  } finally {
+    capturing = false;
+  }
   const review = $('review');
   review.width = selfie.width;
   review.height = selfie.height;
   review.getContext('2d').drawImage(selfie, 0, 0);
   cameraScreen.classList.add('reviewing');
-  const flash = $('flash');
-  for (const [el, cls] of [[flash, 'go'], [cameraScreen, 'snap']]) {
+  // The screen flash replaces the usual shutter flash; the photo still pops in.
+  const anims = flashFired ? [[cameraScreen, 'snap']] : [[$('flash'), 'go'], [cameraScreen, 'snap']];
+  for (const [el, cls] of anims) {
     el.classList.remove(cls);
     void el.offsetWidth; // restart the animation
     el.classList.add(cls);
@@ -419,6 +527,8 @@ function shareVideo() {
 
 $('btn-begin').addEventListener('click', openCamera);
 $('btn-take').addEventListener('click', takePhoto);
+$('btn-flash').addEventListener('click', cycleFlashMode);
+updateFlashButton();
 $('btn-retake').addEventListener('click', retake);
 $('btn-use').addEventListener('click', usePhoto);
 $('btn-again').addEventListener('click', openCamera);
