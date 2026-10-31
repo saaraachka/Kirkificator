@@ -29,7 +29,10 @@ const FLASH_PRE_MS = 250;
 const FLASH_COLOR = '#FFF6E8';
 const FLASH_FADE_MS = 150; // the light fades out over this long after the capture
 const FLASH_MODES = ['auto', 'on', 'off'];
-const FLASH_KEY = 'kirkificator.flash';
+const FLASH_DEFAULT = 'on'; // fires on every photo unless switched off
+// Saved under a new key so choices saved before ON became the default are ignored once.
+const FLASH_KEY = 'kirkificator.flash.v2';
+const FLASH_OLD_KEYS = ['kirkificator.flash'];
 
 const ERROR_TITLE = 'INTERMISSION';
 
@@ -112,10 +115,11 @@ function setFaceFound(found) {
 
 function loadFlashMode() {
   try {
+    for (const key of FLASH_OLD_KEYS) localStorage.removeItem(key);
     const saved = localStorage.getItem(FLASH_KEY);
     if (FLASH_MODES.includes(saved)) return saved;
   } catch { /* storage unavailable */ }
-  return 'auto';
+  return FLASH_DEFAULT;
 }
 
 function saveFlashMode(mode) {
